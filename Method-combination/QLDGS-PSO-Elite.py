@@ -144,6 +144,15 @@ def compute_len_action(state, qtable):
     return action
 
 
+def select_len_action(state, qtable, action_num, use_q_learning, random_actions, default_action):
+    if random_actions:
+        return np.random.randint(action_num)
+    if use_q_learning:
+        return compute_len_action(state, qtable)
+    default_action = max(0, min(action_num - 1, default_action))
+    return default_action
+
+
 def compute_len_reward(param, fit_best_pre, fit_best_cur, fit_best_pre_len, fit_best_cur_len, fit_area_pre,
                        fit_area_pre_start, fit_area_pre_end, fit_area_cur, fit_area_cur_start, fit_area_cur_end, dim):
     r1 = (dim - np.abs((fit_area_cur_start + fit_area_cur_end) / 2 - fit_best_cur_len)) / dim
@@ -333,6 +342,42 @@ def make_increasing(a, step=5):
             # 如果下降，将当前元素增加至前一个元素加上固定间隔
             a[i] = a[i - 1] + step
     return a
+
+
+def baseline_pso_run(xtrain, xvalid, ytrain, yvalid, opts):
+    dim = xtrain.shape[1]
+    N = opts['N']
+    T = opts['T']
+    w = opts.get('baseline_w', 0.9)
+    c1 = opts.get('baseline_c1', 2.0)
+    c2 = opts.get('baseline_c2', 2.0)
+    thres = opts.get('baseline_thres', 0.5)
+    X = np.random.rand(N, dim)
+    V = np.random.uniform(-1, 1, size=(N, dim))
+    pbest = X.copy()
+    gbest = X[0, :].copy()
+    pbest_fit = np.full(N, np.inf)
+    gbest_fit = np.inf
+    curve = np.zeros((1, T))
+    for t in range(T):
+        Xbin = (X > thres).astype(int)
+        for i in range(N):
+            fit = Fun(xtrain, xvalid, ytrain, yvalid, Xbin[i, :], opts)
+            if fit < pbest_fit[i]:
+                pbest_fit[i] = fit
+                pbest[i, :] = X[i, :]
+            if fit < gbest_fit:
+                gbest_fit = fit
+                gbest = X[i, :]
+        curve[0, t] = gbest_fit
+        r1 = np.random.rand(N, dim)
+        r2 = np.random.rand(N, dim)
+        V = w * V + c1 * r1 * (pbest - X) + c2 * r2 * (gbest - X)
+        X = np.clip(X + V, 0, 1)
+    gsel = (gbest > thres).astype(int)
+    nf = np.count_nonzero(gsel)
+    return {'sf': gsel, 'c': curve, 'nf': nf}
+
 def fs(xtrain, xvalid, ytrain, yvalid, opts):
     # ********************固定的参数**********************
     dim = xtrain.shape[1]  # 特征的维度
@@ -340,6 +385,14 @@ def fs(xtrain, xvalid, ytrain, yvalid, opts):
     T = opts['T']
     ql_lr = float(opts.get('ql_lr', 0.2))
     ql_gamma = float(opts.get('ql_gamma', 0.0))
+    ql_mode = str(opts.get('ql_mode', 'full')).lower()
+    if ql_mode not in ['full', 'dim_only', 'random_policy', 'baseline']:
+        ql_mode = 'full'
+    if ql_mode == 'baseline':
+        return baseline_pso_run(xtrain, xvalid, ytrain, yvalid, opts)
+    use_q_learning = ql_mode == 'full'
+    random_len_actions = ql_mode == 'random_policy'
+    default_len_action = int(opts.get('len_action_default', 0))
     Max_FEs = T * N
     curve = np.ones([1, Max_FEs + 500], dtype='float')
     curves = np.ones([1, Max_FEs], dtype='float')
@@ -369,10 +422,13 @@ def fs(xtrain, xvalid, ytrain, yvalid, opts):
     t = 0
     state_cur = 0  # 初始化设置状态为0
     step_total = 0  # 总消耗的迭代次数
-    valued_num = 20
+    valued_num = max(1, int(opts.get('interval_iterations', 20)))
     # 随机生成一个划分区间，用于最优生成
     # action_cur =
-    action_cur = compute_len_action(state_cur, len_qtable)
+    action_cur = select_len_action(state_cur, len_qtable, len_action_num, use_q_learning,
+                                   random_len_actions, default_len_action)
+    if not (use_q_learning or random_len_actions):
+        state_cur = 3
     intervals = partition_intervals(start_dim, end_dim, num_intervals, action_cur, min_range)
     # print(f"dim = {dim}, num = {num_intervals}, intervals = {intervals} ")
     temp_fitness = np.zeros((num_intervals, valued_num))  # 储存每个区间适应度的变量
@@ -439,7 +495,8 @@ def fs(xtrain, xvalid, ytrain, yvalid, opts):
         quarter_len_end_pre = quarter_len_end_cur
         state_pre = state_cur
         # 根据当前长度状态计算获得长度行动
-        action_cur = compute_len_action(state_cur, len_qtable)
+        action_cur = select_len_action(state_cur, len_qtable, len_action_num, use_q_learning,
+                                       random_len_actions, default_len_action)
         # 根据q值得到的行动使用对应的方式划分区间
         intervals = partition_intervals(start_dim, end_dim, num_intervals, action_cur, min_range)
         # temp_x = np.zeros((num_intervals, valued_num, dim))
@@ -502,7 +559,8 @@ def fs(xtrain, xvalid, ytrain, yvalid, opts):
                                    quarter_fit_pre, quarter_len_start_pre, quarter_len_end_pre,
                                    quarter_fit_cur, quarter_len_start_cur, quarter_len_end_cur, dim)
 
-        renew_len_qtable(state_pre, state_cur, action_cur, len_r, len_qtable, ql_lr, ql_gamma)
+        if use_q_learning:
+            renew_len_qtable(state_pre, state_cur, action_cur, len_r, len_qtable, ql_lr, ql_gamma)
     # print(f"结束的t为{t}, intervals 为{intervals}, 最优长度{Nsfb}, 最优适应度{fitGB}")
     intervals = make_increasing(intervals, min_range)
     while t < Max_FEs:

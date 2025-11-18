@@ -12,7 +12,11 @@ from CCM import calculate_metrics
 
 def Fun(X_train, X_valid, Y_train, Y_valid, x, opts):
     # Parameters
-    alpha = 0.99
+    alpha = float(opts.get('phi', 0.99))
+    if alpha < 0:
+        alpha = 0.0
+    if alpha > 1:
+        alpha = 1.0
     beta = 1 - alpha
     # Original feature size
     max_feat = len(x)

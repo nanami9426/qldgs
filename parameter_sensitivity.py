@@ -128,9 +128,11 @@ def run_sensitivity(args):
         raise ValueError("--valid-size must be within (0,1)")
     qldgs_module = load_qldgs_module()
     param_grid = {
+        "phi": parse_numeric_list(args.phi, float),
         "ql_lr": parse_numeric_list(args.ql_lr, float),
         "ql_gamma": parse_numeric_list(args.ql_gamma, float),
         "interval_num": parse_numeric_list(args.interval_num, int),
+        "interval_iterations": parse_numeric_list(args.interval_iterations, int),
         "T": parse_numeric_list(args.iterations, int),
     }
     configs, base_config = build_parameter_configs(param_grid, args.strategy)
@@ -138,6 +140,8 @@ def run_sensitivity(args):
         "maxLt": args.runs,
         "N": args.population,
         "T": base_config["T"],
+        "phi": base_config["phi"],
+        "interval_iterations": base_config["interval_iterations"],
         "cluster": ",",
         "classify": args.classifier,
         "split": args.split,
@@ -166,9 +170,11 @@ def run_sensitivity(args):
                     "dataset": dataset,
                     "run": run_idx,
                     "varying_param": config.get("_varying", "grid"),
+                    "phi": local_opts["phi"],
                     "ql_lr": local_opts["ql_lr"],
                     "ql_gamma": local_opts["ql_gamma"],
                     "interval_num": local_opts["interval_num"],
+                    "interval_iterations": local_opts["interval_iterations"],
                     "iterations": local_opts["T"],
                 }
                 record.update(metrics)
@@ -181,7 +187,16 @@ def run_sensitivity(args):
     results_df.to_csv(output_path, index=False)
     summary = (
         results_df.groupby(
-            ["dataset", "varying_param", "ql_lr", "ql_gamma", "interval_num", "iterations"]
+            [
+                "dataset",
+                "varying_param",
+                "phi",
+                "ql_lr",
+                "ql_gamma",
+                "interval_num",
+                "interval_iterations",
+                "iterations",
+            ]
         )
         .agg(
             acc_test_mean=("acc_test", "mean"),
@@ -219,6 +234,12 @@ def main():
         help="Comma separated interval counts L",
     )
     parser.add_argument(
+        "--interval-iterations",
+        type=str,
+        default="20,30,40",
+        help="Comma separated iteration counts per interval M",
+    )
+    parser.add_argument(
         "--ql-lr", type=str, default="0.1,0.2,0.4", help="Comma separated learning rates"
     )
     parser.add_argument(
@@ -226,6 +247,12 @@ def main():
         type=str,
         default="0.0,0.3,0.6",
         help="Comma separated discount factors",
+    )
+    parser.add_argument(
+        "--phi",
+        type=str,
+        default="0.95,0.98,0.99",
+        help="Comma separated fitness-factor weights φ",
     )
     parser.add_argument("--classifier", type=str, default="knn", help="Classifier for evaluation")
     parser.add_argument("--knn-k", type=int, default=3, help="k used when classifier=knn")
