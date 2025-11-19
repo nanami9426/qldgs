@@ -47,44 +47,98 @@ def load_dataset(name):
     return X, Y
 
 
-def evaluate_configuration(qldgs, X, Y, opts, runs, test_size, valid_size):
+def stratified_split(X, Y, test_size, random_state):
+    stratify = Y if len(np.unique(Y)) > 1 else None
+    return train_test_split(
+        X, Y, test_size=test_size, stratify=stratify, random_state=random_state
+    )
+
+
+def create_data_splits(X, Y, run, split_mode, test_size, valid_size):
+    if split_mode == "train_val_test":
+        X_train_val, X_test, Y_train_val, Y_test = stratified_split(
+            X, Y, test_size=test_size, random_state=run
+        )
+        X_train, X_valid, Y_train, Y_valid = stratified_split(
+            X_train_val, Y_train_val, test_size=valid_size, random_state=run
+        )
+        return {
+            "fs_train": (X_train, Y_train),
+            "fs_valid": (X_valid, Y_valid),
+            "train_eval": (X_train, Y_train),
+            "valid_eval": (X_valid, Y_valid),
+            "test": (X_test, Y_test),
+            "has_valid_eval": True,
+        }
+    X_train_full, X_test, Y_train_full, Y_test = stratified_split(
+        X, Y, test_size=test_size, random_state=run
+    )
+    X_train_fs, X_valid_fs, Y_train_fs, Y_valid_fs = stratified_split(
+        X_train_full, Y_train_full, test_size=valid_size, random_state=run
+    )
+    return {
+        "fs_train": (X_train_fs, Y_train_fs),
+        "fs_valid": (X_valid_fs, Y_valid_fs),
+        "train_eval": (X_train_full, Y_train_full),
+        "valid_eval": None,
+        "test": (X_test, Y_test),
+        "has_valid_eval": False,
+    }
+
+
+def evaluate_configuration(qldgs, X, Y, opts, runs, test_size, valid_size, split_mode):
     dim = X.shape[1]
     results = []
     for run in range(runs):
-        X_train_val, X_test, Y_train_val, Y_test = train_test_split(
-            X, Y, test_size=test_size, stratify=Y, random_state=run
-        )
-        X_train, X_valid, Y_train, Y_valid = train_test_split(
-            X_train_val, Y_train_val, test_size=valid_size, stratify=Y_train_val, random_state=run
-        )
+        split_data = create_data_splits(X, Y, run, split_mode, test_size, valid_size)
+        X_train_fs, Y_train_fs = split_data["fs_train"]
+        X_valid_fs, Y_valid_fs = split_data["fs_valid"]
+        X_train_eval, Y_train_eval = split_data["train_eval"]
+        valid_eval = split_data["valid_eval"]
+        X_test, Y_test = split_data["test"]
         local_opts = opts.copy()
         local_opts["random_seed"] = run
         start = time.time()
-        FS = qldgs.fs(X_train.copy(), X_valid.copy(), Y_train.copy(), Y_valid.copy(), local_opts)
+        FS = qldgs.fs(
+            X_train_fs.copy(), X_valid_fs.copy(), Y_train_fs.copy(), Y_valid_fs.copy(), local_opts
+        )
         elapsed = time.time() - start
         selected = FS["sf"] == 1
         if not np.any(selected):
             selected = np.ones(dim, dtype=bool)
-        valid_pred = classifier_method(
-            X_train[:, selected], X_valid[:, selected], Y_train, Y_valid, local_opts
-        )
+        run_metrics = {
+            "nf": FS["nf"],
+            "time": elapsed,
+        }
+        if split_data["has_valid_eval"]:
+            X_valid_eval, Y_valid_eval = valid_eval
+            valid_pred = classifier_method(
+                X_train_fs[:, selected],
+                X_valid_eval[:, selected],
+                Y_train_fs,
+                Y_valid_eval,
+                local_opts,
+            )
+            valid_metrics = calculate_metrics(Y_valid_eval, valid_pred, "all")
+            run_metrics.update(
+                {
+                    "acc_valid": valid_metrics["Accuracy"],
+                    "f1_valid": valid_metrics["F1-Score (Macro)"],
+                    "auc_valid": valid_metrics["ROC AUC (Macro)"],
+                }
+            )
         test_pred = classifier_method(
-            X_train[:, selected], X_test[:, selected], Y_train, Y_test, local_opts
+            X_train_eval[:, selected], X_test[:, selected], Y_train_eval, Y_test, local_opts
         )
-        valid_metrics = calculate_metrics(Y_valid, valid_pred, "all")
         test_metrics = calculate_metrics(Y_test, test_pred, "all")
-        results.append(
+        run_metrics.update(
             {
-                "nf": FS["nf"],
-                "time": elapsed,
-                "acc_valid": valid_metrics["Accuracy"],
                 "acc_test": test_metrics["Accuracy"],
-                "f1_valid": valid_metrics["F1-Score (Macro)"],
                 "f1_test": test_metrics["F1-Score (Macro)"],
-                "auc_valid": valid_metrics["ROC AUC (Macro)"],
                 "auc_test": test_metrics["ROC AUC (Macro)"],
             }
         )
+        results.append(run_metrics)
     return results
 
 
@@ -122,7 +176,14 @@ def run(args):
             local_opts.update(mode_cfg)
             print(f"{dataset} -> {mode}")
             mode_results = evaluate_configuration(
-                qldgs, X, Y, local_opts, args.runs, args.test_size, args.valid_size
+                qldgs,
+                X,
+                Y,
+                local_opts,
+                args.runs,
+                args.test_size,
+                args.valid_size,
+                args.split_mode,
             )
             for run_idx, metrics in enumerate(mode_results):
                 record = {
@@ -132,33 +193,46 @@ def run(args):
                     "ql_mode": mode_cfg.get("ql_mode"),
                     "nf": metrics["nf"],
                     "time": metrics["time"],
-                    "acc_valid": metrics["acc_valid"],
                     "acc_test": metrics["acc_test"],
-                    "f1_valid": metrics["f1_valid"],
                     "f1_test": metrics["f1_test"],
-                    "auc_valid": metrics["auc_valid"],
                     "auc_test": metrics["auc_test"],
                 }
+                if args.split_mode == "train_val_test":
+                    record.update(
+                        {
+                            "acc_valid": metrics["acc_valid"],
+                            "f1_valid": metrics["f1_valid"],
+                            "auc_valid": metrics["auc_valid"],
+                        }
+                    )
                 records.append(record)
     df = pd.DataFrame(records)
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(output, index=False)
-    summary = (
-        df.groupby(["dataset", "mode"])
-        .agg(
-            acc_test_mean=("acc_test", "mean"),
-            acc_test_std=("acc_test", "std"),
-            f1_test_mean=("f1_test", "mean"),
-            f1_test_std=("f1_test", "std"),
-            auc_test_mean=("auc_test", "mean"),
-            auc_test_std=("auc_test", "std"),
-            nf_mean=("nf", "mean"),
-            nf_std=("nf", "std"),
-            time_mean=("time", "mean"),
+    agg_kwargs = {
+        "acc_test_mean": ("acc_test", "mean"),
+        "acc_test_std": ("acc_test", "std"),
+        "f1_test_mean": ("f1_test", "mean"),
+        "f1_test_std": ("f1_test", "std"),
+        "auc_test_mean": ("auc_test", "mean"),
+        "auc_test_std": ("auc_test", "std"),
+        "nf_mean": ("nf", "mean"),
+        "nf_std": ("nf", "std"),
+        "time_mean": ("time", "mean"),
+    }
+    if args.split_mode == "train_val_test":
+        agg_kwargs.update(
+            {
+                "acc_valid_mean": ("acc_valid", "mean"),
+                "acc_valid_std": ("acc_valid", "std"),
+                "f1_valid_mean": ("f1_valid", "mean"),
+                "f1_valid_std": ("f1_valid", "std"),
+                "auc_valid_mean": ("auc_valid", "mean"),
+                "auc_valid_std": ("auc_valid", "std"),
+            }
         )
-        .reset_index()
-    )
+    summary = df.groupby(["dataset", "mode"]).agg(**agg_kwargs).reset_index()
     summary_path = output.with_name(f"{output.stem}_summary.csv")
     summary.to_csv(summary_path, index=False)
     print(f"Ablation raw logs saved to {output}")
@@ -183,19 +257,28 @@ def main():
     parser.add_argument("--split", type=int, default=0, help="Split strategy used in Fun")
     parser.add_argument("--func", type=int, default=0, help="Objective variant")
     parser.add_argument(
-        "--test-size", type=float, default=0.2, help="Fraction reserved for held-out test data"
+        "--test-size",
+        type=float,
+        default=0.2,
+        help="Fraction reserved for held-out test data (0.2 -> 6:2:2 or 8:2)",
     )
     parser.add_argument(
         "--valid-size",
         type=float,
         default=0.25,
-        help="Fraction of remaining data used for validation",
+        help="Validation fraction within remaining data; also used internally when running 8:2",
     )
     parser.add_argument(
         "--modes",
         nargs="*",
         choices=list(DEFAULT_MODES.keys()),
         help="Subset of ablation modes to run",
+    )
+    parser.add_argument(
+        "--split-mode",
+        choices=["train_val_test", "train_test"],
+        default="train_val_test",
+        help="Dataset split type: 6:2:2 train/val/test or 8:2 train/test",
     )
     parser.add_argument(
         "--output",
