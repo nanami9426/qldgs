@@ -121,7 +121,6 @@ def run(args):
             }
             local_opts.update(mode_cfg)
             print(f"{dataset} -> {mode}")
-            print(f"{local_opts}")
             mode_results = evaluate_configuration(
                 qldgs, X, Y, local_opts, args.runs, args.test_size, args.valid_size
             )
