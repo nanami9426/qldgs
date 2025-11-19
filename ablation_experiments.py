@@ -70,6 +70,18 @@ def create_data_splits(X, Y, run, split_mode, test_size, valid_size):
             "test": (X_test, Y_test),
             "has_valid_eval": True,
         }
+    if split_mode == "main_exvute":
+        X_train, X_test, Y_train, Y_test = stratified_split(
+            X, Y, test_size=test_size, random_state=run
+        )
+        return {
+            "fs_train": (X_train, Y_train),
+            "fs_valid": (X_test, Y_test),
+            "train_eval": (X_train, Y_train),
+            "valid_eval": (X_test, Y_test),
+            "test": (X_test, Y_test),
+            "has_valid_eval": True,
+        }
     X_train_full, X_test, Y_train_full, Y_test = stratified_split(
         X, Y, test_size=test_size, random_state=run
     )
@@ -197,7 +209,7 @@ def run(args):
                     "f1_test": metrics["f1_test"],
                     "auc_test": metrics["auc_test"],
                 }
-                if args.split_mode == "train_val_test":
+                if args.split_mode in ("train_val_test", "main_exvute"):
                     record.update(
                         {
                             "acc_valid": metrics["acc_valid"],
@@ -221,7 +233,7 @@ def run(args):
         "nf_std": ("nf", "std"),
         "time_mean": ("time", "mean"),
     }
-    if args.split_mode == "train_val_test":
+    if args.split_mode in ("train_val_test", "main_exvute"):
         agg_kwargs.update(
             {
                 "acc_valid_mean": ("acc_valid", "mean"),
@@ -260,7 +272,7 @@ def main():
         "--test-size",
         type=float,
         default=0.2,
-        help="Fraction reserved for held-out test data (0.2 -> 6:2:2 or 8:2)",
+        help="Fraction reserved for held-out test data (set 0.3 to match Main_exvute)",
     )
     parser.add_argument(
         "--valid-size",
@@ -276,9 +288,9 @@ def main():
     )
     parser.add_argument(
         "--split-mode",
-        choices=["train_val_test", "train_test"],
+        choices=["train_val_test", "train_test", "main_exvute"],
         default="train_val_test",
-        help="Dataset split type: 6:2:2 train/val/test or 8:2 train/test",
+        help="Dataset split type: 6:2:2 train/val/test, 8:2 train/test, or Main_exvute's shared 7:3 split",
     )
     parser.add_argument(
         "--output",

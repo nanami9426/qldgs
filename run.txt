@@ -1,0 +1,26 @@
+python parameter_sensitivity.py \
+  --datasets Leukemia2 Colon T9 BT1 BreastGCE T11 CNS LKM1 Prostate LKM2 "CML treatment" ALL_AML_4 \
+  --runs 5 --population 20 --iterations 200,400,600 \
+  --interval-num 10,15,20 --interval-iterations 20,30,40 \
+  --ql-lr 0.1,0.2,0.4 --ql-gamma 0.0,0.3,0.6 --phi 0.95,0.98,0.99 \
+  --classifier knn --knn-k 3 --split 0 --func 0 \
+  --split-mode train_test --test-size 0.2 \
+  --strategy one-vs-rest --output Result/parameter_sensitivity.csv
+
+python ablation_experiments.py \
+  --datasets Leukemia2 Colon T9 BT1 BreastGCE T11 CNS LKM1 Prostate LKM2 "CML treatment" ALL_AML_4 \
+  --runs 5 --population 20 --iterations 500 \
+  --interval-num 20 --interval-iterations 20 \
+  --ql-lr 0.2 --ql-gamma 0.5 --phi 0.99 \
+  --classifier knn --knn-k 3 --split 0 --func 0 \
+  --split-mode train_test --test-size 0.2 \
+  --output Result/ablation_experiments.csv
+
+  python parameter_sensitivity.py \
+  --datasets Leukemia2 ALL_AML_4 \
+  --runs 3 --population 20 --iterations 400 \
+  --interval-num 15,20 --interval-iterations 20 \
+  --ql-lr 0.1,0.2 --ql-gamma 0.3,0.6 --phi 0.95 \
+  --classifier knn --knn-k 3 --split 0 --func 0 \
+  --split-mode train_test --test-size 0.3 \
+  --strategy one-vs-rest --output Result/parameter_sensitivity.csv
