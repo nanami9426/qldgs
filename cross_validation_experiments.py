@@ -375,22 +375,20 @@ def main():
 
     dataset = [
         "Leukemia2",
-        # "Colon",
-        # "T9",
-        # "BT1",
-        # "BreastGCE",
-        # "T11",
-        # "CNS",
-        # "LKM1",
-        # "Prostate",
-        # "LKM2",
-        # "CML treatment",
-        # "ALL_AML_4",
+        "Colon",
+        "T9",
+        "BT1",
+        "BreastGCE",
+        "T11",
+        "CNS",
+        "LKM1",
+        "Prostate",
+        "LKM2",
+        "CML treatment",
+        "ALL_AML_4",
     ]
     dataset = [filename.rstrip(".csv") for filename in dataset]
-
-    # methodset = ["QLDGS-GA", "QLDGS-PSO", "SFEPSO"]
-    methodset = ["QLDGS-GA", "QLDGS-PSO"]
+    methodset = ['QLDGS-PSO-Elite', "QLDGS-PSO", 'FTMGWO', 'FESSA', 'SFE', 'PSO', 'BBPSO', 'VLPSO', 'SFEPSO']
     desired_folds = 5
     runs = desired_folds
     N = 20
