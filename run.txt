@@ -7,7 +7,7 @@ python parameter_sensitivity.py \
   --interval-iterations 20,30,40 \
   --ql-lr 0.1,0.2,0.3 \
   --ql-gamma 0.3,0.5,0.7 \
-  --phi 0.95,0.97,0.99 \
+  --phi 0.95,0.97,0.99,0.1,0.13,0.15 \
   --strategy one-vs-rest \
   --test-size 0.3 \
   --classifier knn \
