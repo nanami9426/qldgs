@@ -372,6 +372,7 @@ def main():
     sys.path.append("Method-transfer")
     sys.path.append("Generalization")
     sys.path.append("Method-combination")
+    sys.path.append("Method-add")
 
     dataset = [
         "Leukemia2",
@@ -388,7 +389,8 @@ def main():
         "ALL_AML_4",
     ]
     dataset = [filename.rstrip(".csv") for filename in dataset]
-    methodset = ['QLDGS-PSO-Elite', "QLDGS-PSO", 'FTMGWO', 'FESSA', 'SFE', 'PSO', 'BBPSO', 'VLPSO', 'SFEPSO']
+    # methodset = ['QLDGS-PSO-Elite', "QLDGS-PSO", 'FTMGWO', 'FESSA', 'SFE', 'PSO', 'BBPSO', 'VLPSO', 'SFEPSO']
+    methodset = ['rlpsoasm']
     desired_folds = 5
     runs = desired_folds
     N = 20
