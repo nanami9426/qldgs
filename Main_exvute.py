@@ -318,6 +318,7 @@ def main():
     sys.path.append('Method-transfer')
     sys.path.append('Generalization')
     sys.path.append('Method-combination')
+    sys.path.append('Method-add')
     path = 'Dataset'  # 数据集文件夹路径
     file_names = os.listdir(path)  # 获取文件夹中所有文件名
     sorted_file_names = sorted(file_names)  # 对文件名进行排序
@@ -331,10 +332,11 @@ def main():
     dataset = [filename.rstrip('.csv') for filename in dataset]  # 去除.csv后缀
     data_num = len(dataset)
     # 运行的方法
-    methodset = ['QLDGS-GA','QLDGS-PSO', 'SFEPSO', 'VLPSO', 'BBPSO', 'CUSSPSO', 'PSO', 'QBSO']
-    methodset = ['VLPSO', 'FESSA', 'FTMGWO', 'BBPSO','SFEPSO','SFE','PSO','QLDGS-PSO', 'QLDGS-PSO-Elite']
-    methodset = ['QLDGS-GA', 'QLDGS-PSO', 'SFEPSO', 'VLPSO', 'BBPSO', 'CUSSPSO', 'PSO', 'QBSO']
-    methodset = ['QLDGS-GA', 'QLDGS-PSO', 'SFEPSO']
+    # methodset = ['QLDGS-GA','QLDGS-PSO', 'SFEPSO', 'VLPSO', 'BBPSO', 'CUSSPSO', 'PSO', 'QBSO']
+    # methodset = ['VLPSO', 'FESSA', 'FTMGWO', 'BBPSO','SFEPSO','SFE','PSO','QLDGS-PSO', 'QLDGS-PSO-Elite']
+    # methodset = ['QLDGS-GA', 'QLDGS-PSO', 'SFEPSO', 'VLPSO', 'BBPSO', 'CUSSPSO', 'PSO', 'QBSO']
+    # methodset = ['QLDGS-GA', 'QLDGS-PSO', 'SFEPSO']
+    methodset = ['rlpsoasm', 'QLDGS-PSO', 'QLDGS-PSO-Elite']
     method_num = len(methodset)
     # 共同参数
     runs = 2  # 方法运行次数
