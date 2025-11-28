@@ -1,456 +1,589 @@
+#!/usr/bin/env python3
+"""
+Python port of the MATLAB pipeline defined in optimization.txt.
+The goal is to mirror the original logic and produce equivalent results.
+"""
+
+from __future__ import annotations
+
+import math
+import time
+from typing import Dict, Iterable, Optional, Tuple
+
 import numpy as np
+from scipy.io import loadmat
+from scipy.optimize import linear_sum_assignment
 
-# ------------------------------------------------------------
-# 基础工具：KMeans（无依赖版）、one-hot、kNN 图、拉普拉斯
-# ------------------------------------------------------------
+EPS = np.finfo(float).eps
 
-def kmeans(X, n_clusters, n_init=10, max_iter=100, random_state=None):
+
+def EuDist2(fea_a: np.ndarray, fea_b: Optional[np.ndarray] = None, bSqrt: bool = True) -> np.ndarray:
     """
-    简单 KMeans 实现，X: (n_samples, n_features)
-    返回 labels: (n_samples,)
+    Compute the (squared) Euclidean distance matrix.
+    Mirrors the MATLAB EuDist2 implementation used in optimization.txt.
     """
-    rng = np.random.RandomState(random_state)
-    n_samples, n_features = X.shape
-    if n_samples < n_clusters:
-        raise ValueError("n_samples < n_clusters")
+    if fea_b is None:
+        aa = np.sum(fea_a * fea_a, axis=1)
+        ab = fea_a @ fea_a.T
+        D = aa[:, None] + aa[None, :] - 2 * ab
+        D[D < 0] = 0
+        if bSqrt:
+            D = np.sqrt(D)
+        return np.maximum(D, D.T)
 
-    best_inertia = None
-    best_labels = None
-
-    for _ in range(n_init):
-        # 随机初始化簇中心
-        init_idx = rng.choice(n_samples, size=n_clusters, replace=False)
-        centroids = X[init_idx].copy()
-
-        for _ in range(max_iter):
-            # 计算到簇中心的距离并分配标签
-            diff = X[:, None, :] - centroids[None, :, :]   # (n, k, d)
-            dist2 = np.sum(diff**2, axis=2)                # (n, k)
-            labels = np.argmin(dist2, axis=1)
-
-            # 更新簇中心
-            new_centroids = np.zeros_like(centroids)
-            for k in range(n_clusters):
-                pts = X[labels == k]
-                if len(pts) == 0:
-                    new_centroids[k] = X[rng.randint(0, n_samples)]
-                else:
-                    new_centroids[k] = pts.mean(axis=0)
-
-            if np.allclose(centroids, new_centroids):
-                centroids = new_centroids
-                break
-            centroids = new_centroids
-
-        # 计算当前初始化的 inertia
-        diff = X - centroids[labels]
-        inertia = np.sum(diff**2)
-
-        if best_inertia is None or inertia < best_inertia:
-            best_inertia = inertia
-            best_labels = labels.copy()
-
-    return best_labels
+    aa = np.sum(fea_a * fea_a, axis=1)
+    bb = np.sum(fea_b * fea_b, axis=1)
+    ab = fea_a @ fea_b.T
+    D = aa[:, None] + bb[None, :] - 2 * ab
+    D[D < 0] = 0
+    if bSqrt:
+        D = np.sqrt(D)
+    return D
 
 
-def one_hot(labels, n_classes=None):
-    labels = np.asarray(labels, dtype=int)
-    if n_classes is None:
-        n_classes = int(labels.max()) + 1
-    n_samples = labels.shape[0]
-    E = np.zeros((n_samples, n_classes), dtype=float)
-    E[np.arange(n_samples), labels] = 1.0
-    return E
+def NormalizeFea(fea: np.ndarray) -> np.ndarray:
+    norms = np.linalg.norm(fea, axis=1, keepdims=True)
+    norms[norms == 0] = 1.0
+    return fea / norms
 
 
-def knn_graph(X, n_neighbors=5, sigma=None):
+def constructW(fea: np.ndarray, options: Dict) -> np.ndarray:
     """
-    使用高斯核构建对称 kNN 图。
-    X: (n_nodes, dim)
-    返回 S: (n_nodes, n_nodes)
+    Graph construction function translated from constructW.m.
+    Only the logic exercised by optimization.txt is required, but the full
+    control flow is preserved for fidelity.
     """
-    X = np.asarray(X, dtype=float)
-    n_samples = X.shape[0]
+    if options is None:
+        options = {}
 
-    # 两两欧式距离平方
-    diff = X[:, None, :] - X[None, :, :]
-    dist2 = np.sum(diff**2, axis=2)
-    np.fill_diagonal(dist2, np.inf)
+    neighbor_mode = options.get("NeighborMode", "KNN").lower()
+    weight_mode = options.get("WeightMode", "HeatKernel").lower()
+    k = int(options.get("k", 5))
+    t = options.get("t", None)
+    b_normalized = bool(options.get("bNormalized", False))
+    b_self_connected = bool(options.get("bSelfConnected", False))
+    b_true_knn = bool(options.get("bTrueKNN", False))
 
-    # k 最近邻索引
-    knn_idx = np.argsort(dist2, axis=1)[:, :n_neighbors]
+    b_binary = weight_mode == "binary"
+    b_cosine = weight_mode == "cosine"
 
-    # 自适应 sigma：各点到其 kNN 的距离的均值
-    if sigma is None:
-        knn_distances = dist2[np.arange(n_samples)[:, None], knn_idx]
-        sigma = np.sqrt(np.mean(knn_distances))
-        if sigma <= 0 or not np.isfinite(sigma):
-            sigma = 1.0
+    if t is None and weight_mode == "heatkernel":
+        nSmp = fea.shape[0]
+        if nSmp > 3000:
+            idx = np.random.choice(nSmp, 3000, replace=False)
+            D = EuDist2(fea[idx, :])
+        else:
+            D = EuDist2(fea)
+        t = np.mean(D)
 
-    S = np.zeros((n_samples, n_samples), dtype=float)
-    for i in range(n_samples):
-        for j in knn_idx[i]:
-            if not np.isfinite(dist2[i, j]):
-                continue
-            w = np.exp(-dist2[i, j] / (sigma ** 2))
-            # xi ∈ N(xj) 或 xj ∈ N(xi) 时取最大权重，保证对称
-            S[i, j] = max(S[i, j], w)
-            S[j, i] = max(S[j, i], w)
+    if neighbor_mode == "supervised":
+        raise ValueError("Supervised graph mode is not needed in this pipeline.")
 
-    return S
+    if b_cosine and not b_normalized:
+        fea = NormalizeFea(fea)
+
+    nSmp = fea.shape[0]
+
+    if neighbor_mode == "knn" and k > 0:
+        if b_cosine:
+            dist = fea @ fea.T
+            # For cosine similarity, larger values indicate closer neighbors.
+            idx = np.argpartition(-dist, range(k + 1), axis=1)[:, : k + 1]
+            weights = dist[np.arange(nSmp)[:, None], idx]
+            if not b_binary:
+                dump = weights
+            else:
+                dump = np.ones_like(weights)
+        else:
+            dist = EuDist2(fea, None, bSqrt=False)
+            idx = np.argpartition(dist, range(k + 1), axis=1)[:, : k + 1]
+            weights = dist[np.arange(nSmp)[:, None], idx]
+            if not b_binary:
+                dump = np.exp(-weights / (2 * (t ** 2)))
+            else:
+                dump = np.ones_like(weights)
+
+        G = np.zeros((nSmp, nSmp))
+        row_ids = np.repeat(np.arange(nSmp), k + 1)
+        col_ids = idx.flatten()
+        G[row_ids, col_ids] = dump.flatten()
+        if b_binary:
+            G[G != 0] = 1
+        if not b_self_connected:
+            np.fill_diagonal(G, 0)
+        if not b_true_knn:
+            G = np.maximum(G, G.T)
+        return G
+
+    # Complete graph branch (k == 0) or other modes fall back here.
+    if neighbor_mode == "knn" and k == 0:
+        if weight_mode == "binary":
+            raise ValueError("Binary weight cannot be used for complete graph.")
+        if weight_mode == "heatkernel":
+            W = EuDist2(fea, None, bSqrt=False)
+            W = np.exp(-W / (2 * (t ** 2)))
+        elif weight_mode == "cosine":
+            normfea = NormalizeFea(fea)
+            W = normfea @ normfea.T
+        else:
+            raise ValueError("Unknown WeightMode.")
+        if not b_self_connected:
+            np.fill_diagonal(W, 0)
+        return np.maximum(W, W.T)
+
+    raise ValueError("Unsupported NeighborMode.")
 
 
-def laplacian(S):
-    d = S.sum(axis=1)
-    return np.diag(d) - S
+def MutualInfo(L1: np.ndarray, L2: np.ndarray) -> float:
+    L1 = L1.ravel()
+    L2 = L2.ravel()
+    if L1.shape != L2.shape:
+        raise ValueError("size(L1) must == size(L2)")
+
+    Label = np.unique(L1)
+    nClass = len(Label)
+
+    Label2 = np.unique(L2)
+    nClass2 = len(Label2)
+
+    # Smooth if class counts mismatch.
+    if nClass2 < nClass:
+        L1 = np.concatenate([L1, Label])
+        L2 = np.concatenate([L2, Label])
+    elif nClass2 > nClass:
+        L1 = np.concatenate([L1, Label2])
+        L2 = np.concatenate([L2, Label2])
+
+    G = np.zeros((nClass, nClass))
+    for i, lab1 in enumerate(Label):
+        for j, lab2 in enumerate(Label):
+            G[i, j] = np.sum((L1 == lab1) & (L2 == lab2))
+    sumG = np.sum(G)
+
+    P1 = np.sum(G, axis=1) / sumG
+    P2 = np.sum(G, axis=0) / sumG
+
+    if np.any(P1 == 0) or np.any(P2 == 0):
+        raise ValueError("Smooth fail!")
+
+    H1 = np.sum(-P1 * np.log2(P1))
+    H2 = np.sum(-P2 * np.log2(P2))
+    P12 = G / sumG
+    PPP = P12 / (P2.reshape(1, -1) * P1.reshape(-1, 1))
+    PPP[np.abs(PPP) < 1e-12] = 1
+    MI = np.sum(P12 * np.log2(PPP))
+    MIhat = MI / max(H1, H2)
+    return float(np.real(MIhat))
 
 
-# ------------------------------------------------------------
-# GOD 中各个变量的更新：W, E, B，以及目标函数
-# ------------------------------------------------------------
-
-def update_V_W(W, eps=1e-8):
+def hungarian(A: np.ndarray) -> Tuple[np.ndarray, float]:
     """
-    计算 l2,1-2 非凸正则中的对角重加权矩阵 V_W（式(24)）。
+    Python replacement for hungarian.m using scipy.optimize.linear_sum_assignment.
+    Returns (C, T) where C is the assignment vector (column -> row).
     """
-    row_norm2 = np.sum(W**2, axis=1)           # 每行的 ||w_i||_2^2
-    denom = np.maximum(row_norm2, eps)
-    diag_vals = 1.0 / (2.0 * denom)
-    return np.diag(diag_vals)
+    row_ind, col_ind = linear_sum_assignment(A)
+    C = np.zeros(A.shape[1], dtype=int)
+    for r, c in zip(row_ind, col_ind):
+        C[c] = r + 1  # MATLAB is 1-based; match bestMap expectations.
+    T = float(A[row_ind, col_ind].sum())
+    return C, T
 
 
-def update_W(X_d_n, W, B, E, L_W, L_E, beta, alpha, gamma, eps=1e-8):
+def bestMap(L1: np.ndarray, L2: np.ndarray) -> np.ndarray:
+    L1 = L1.ravel()
+    L2 = L2.ravel()
+    if L1.shape != L2.shape:
+        raise ValueError("size(L1) must == size(L2)")
+
+    Label1 = np.unique(L1)
+    nClass1 = len(Label1)
+    Label2 = np.unique(L2)
+    nClass2 = len(Label2)
+
+    nClass = max(nClass1, nClass2)
+    G = np.zeros((nClass, nClass))
+    for i in range(nClass1):
+        for j in range(nClass2):
+            G[i, j] = np.sum((L1 == Label1[i]) & (L2 == Label2[j]))
+
+    c, _ = hungarian(-G)
+    newL2 = np.zeros_like(L2)
+    for i in range(nClass2):
+        newL2[L2 == Label2[i]] = Label1[c[i] - 1]
+    return newL2
+
+
+def accuracy(YPred: np.ndarray, target: np.ndarray, classes: Iterable) -> Tuple[float, np.ndarray]:
+    classes = np.array(list(classes))
+    pred_idx = np.argmax(YPred, axis=1)
+    prediction = classes[pred_idx]
+    score = float(np.sum(prediction == target) / target.size)
+    return score, prediction
+
+
+def litekmeans(
+    X: np.ndarray,
+    k: int,
+    distance: str = "sqeuclidean",
+    start: str | np.ndarray = "sample",
+    max_iter: int = 100,
+    replicates: int = 1,
+    clustermaxiter: int = 10,
+) -> Tuple[np.ndarray, np.ndarray, bool, np.ndarray, np.ndarray]:
     """
-    按照式(23)(25) 对 W 做一次乘法更新：
-        W_ij <- W_ij * (正梯度项 / 负梯度项)
-    X_d_n : (d, n)  （论文记号中的 X）
-    W     : (d, c)
-    B     : (c, c)
-    E     : (n, c)
-    L_W   : (d, d) 特征图拉普拉斯
-    L_E   : (n, n) E 上的拉普拉斯（局部保持项用）
+    Numpy implementation of litekmeans.m.
+    Returns (label, center, bCon, sumD, D).
     """
-    d, n = X_d_n.shape
-    X = X_d_n
+    if k <= 0 or X.shape[0] < k:
+        raise ValueError("k must be a positive integer less than the number of samples.")
 
-    # Frobenius 范数平方 Tr(WW^T)
-    tr_WWT = np.sum(W**2)
+    n, p = X.shape
+    if isinstance(start, np.ndarray):
+        if start.ndim == 2 and start.shape[1] == p:
+            center_init = start
+        elif start.ndim == 1 and start.size == k:
+            center_init = X[start, :]
+        else:
+            raise ValueError("Invalid start matrix.")
+        start_mode = "numeric"
+    else:
+        start_mode = start.lower()
+        center_init = None
 
-    # X E B^T  (d x n)(n x c)(c x c) = (d x c)
-    XEBt = X @ (E @ B.T)
+    if center_init is not None:
+        replicates = 1
 
-    V_W = update_V_W(W, eps=eps)
+    bestlabel = None
+    bestcenter = None
+    bestsumD = None
+    bestD = None
+    bCon = False
 
-    # XX^T W
-    XXt = X @ X.T               # (d x d)
-    XXtW = XXt @ W
+    for rep in range(replicates):
+        if start_mode == "sample":
+            center = X[np.random.choice(n, k, replace=False), :]
+        elif start_mode == "cluster":
+            subset = X[np.random.choice(n, max(1, int(math.floor(0.1 * n))), replace=False), :]
+            label_sub, center, _, _, _ = litekmeans(
+                subset, k, distance=distance, start="sample", max_iter=clustermaxiter, replicates=1
+            )
+        elif start_mode == "numeric":
+            center = center_init.copy()
+        else:
+            raise ValueError("Unknown start mode.")
 
-    # X L_E X^T W
-    XLEXtW = (X @ L_E @ X.T) @ W
+        label = np.ones(n, dtype=int)
+        last = np.zeros_like(label)
+        it = 0
 
-    # L_W W
-    LW_W = L_W @ W
+        if distance.lower() == "sqeuclidean":
+            while np.any(label != last) and it < max_iter:
+                last = label.copy()
+                bb = np.sum(center * center, axis=1)
+                ab = X @ center.T
+                D = bb.reshape(1, -1) - 2 * ab
+                label = np.argmin(D, axis=1) + 1  # 1-based labels
 
-    # 分子：XEB^T + 0.5 * beta * (Tr(WW^T))^{-1/2} * W
-    tr_term = np.sqrt(max(tr_WWT, eps))
-    num = XEBt + 0.5 * beta * (1.0 / tr_term) * W
+                ll = np.unique(label)
+                if len(ll) < k:
+                    miss_cluster = [c for c in range(1, k + 1) if c not in ll]
+                    aa = np.sum(X * X, axis=1)
+                    val = aa + D[np.arange(n), label - 1]
+                    idx = np.argsort(val)[::-1]
+                    label[idx[: len(miss_cluster)]] = miss_cluster
 
-    # 分母：XX^T W + beta V_W W + gamma X L_E X^T W + alpha L_W W
-    denom = XXtW + beta * (V_W @ W) + gamma * XLEXtW + alpha * LW_W
-    denom = np.maximum(denom, eps)
+                E = np.zeros((n, k))
+                E[np.arange(n), label - 1] = 1
+                center = (E.T @ X) / (E.sum(axis=0)[:, None] + EPS)
+                it += 1
+            bCon = it < max_iter
+            aa = np.sum(X * X, axis=1)
+            bb = np.sum(center * center, axis=1)
+            ab = X @ center.T
+            D = aa[:, None] + bb.reshape(1, -1) - 2 * ab
+            D[D < 0] = 0
+            D = np.sqrt(D)
+        else:  # cosine
+            center = NormalizeFea(center)
+            while np.any(label != last) and it < max_iter:
+                last = label.copy()
+                W = X @ center.T
+                label = np.argmax(W, axis=1) + 1
+                ll = np.unique(label)
+                if len(ll) < k:
+                    miss_cluster = [c for c in range(1, k + 1) if c not in ll]
+                    val = W[np.arange(n), label - 1]
+                    idx = np.argsort(val)
+                    label[idx[: len(miss_cluster)]] = miss_cluster
 
-    W_new = W * (num / denom)
-    # 保证非负，避免 0 锁死
-    W_new = np.maximum(W_new, eps)
-    return W_new
+                E = np.zeros((n, k))
+                E[np.arange(n), label - 1] = 1
+                center = (E.T @ X) / (E.sum(axis=0)[:, None] + EPS)
+                center = NormalizeFea(center)
+                it += 1
+            bCon = it < max_iter
+            W = X @ center.T
+            D = 1 - W
+
+        sumD = np.array([np.sum(D[label == (j + 1), j]) for j in range(k)])
+
+        if bestlabel is None or np.sum(sumD) < np.sum(bestsumD):
+            bestlabel = label.copy()
+            bestcenter = center.copy()
+            bestsumD = sumD.copy()
+            bestD = D.copy()
+
+    return bestlabel, bestcenter, bCon, bestsumD, bestD
 
 
-def update_E(A, C, E_init, n_iter=5):
-    """
-    对应 Algorithm 1：在 Stiefel 流形上解
-        min_{E^T E = I} Tr(E^T A E) - Tr(E^T C)
-    用 A_tilde = mu I - A 的形式转成
-        max Tr(E^T P)，P = A_tilde E + C/2
-    然后用 Procrustes（SVD）得到 E = U V^T。
-    A      : (n, n)，这里取 alpha * L
-    C      : (n, c)，这里取 2(X W B + eta Z)
-    E_init : (n, c)
-    """
-    A = np.asarray(A, dtype=float)
-    C = np.asarray(C, dtype=float)
-    E = np.asarray(E_init, dtype=float)
+def optimization1(
+    W: np.ndarray,
+    X: np.ndarray,
+    E: np.ndarray,
+    B: np.ndarray,
+    Z: np.ndarray,
+    Da: np.ndarray,
+    Ls: np.ndarray,
+    Lw: np.ndarray,
+    n_class: int,
+    alpha: float,
+    beta: float,
+    gamma: float,
+    delta: float,
+) -> Tuple[float, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    nFeat, nSamp = X.shape
+    numerator = X @ E @ B.T + 0.5 * beta * (np.trace(W @ W.T) ** -0.5) * W
+    denominator = (X @ X.T @ W) + beta * (Da @ W) + gamma * (X @ Ls @ X.T @ W) + alpha * (Lw @ W) + EPS
+    W = W * (numerator / denominator)
 
-    n, c = E.shape
+    T1 = E.T @ X.T @ W
+    U_b, _, Vh_b = np.linalg.svd(T1, full_matrices=True)
+    B = Vh_b.T @ U_b.T
 
-    # 先把初始 E 正交化
-    U, _, Vt = np.linalg.svd(E, full_matrices=False)
-    E = U @ Vt
-
-    # 估计 mu > 最大特征值，保证 A_tilde 正定
+    AA = alpha * Ls
     try:
-        eigvals = np.linalg.eigvalsh(A)
-        mu = float(eigvals.max()) + 1e-3
+        eigvals = np.linalg.eigvalsh(AA)
     except np.linalg.LinAlgError:
-        # 回退：用 trace/n 当粗略上界
-        mu = float(np.trace(A) / A.shape[0] + 1.0)
+        eigvals = np.linalg.eigvals(AA).real
+    u1 = float(np.max(eigvals))
+    AA1 = u1 * np.eye(nSamp) - AA
+    B1 = 2 * (X.T @ W @ B) + 2 * delta * Z
+    P = AA1 @ E + 0.5 * B1
+    U_m, _, Vh_m = np.linalg.svd(P, full_matrices=True)
+    E = U_m[:, :n_class] @ Vh_m[:n_class, :]
 
-    A_tilde = mu * np.eye(A.shape[0]) - A
+    Z = np.maximum(E, 0)
 
-    for _ in range(n_iter):
-        # P = A_tilde E + C/2
-        P = A_tilde @ E + 0.5 * C
-        # 解 max_{E^T E = I} Tr(E^T P) => E = U V^T
-        U, _, Vt = np.linalg.svd(P, full_matrices=False)
-        E = U @ Vt
-
-    return E
-
-
-def update_B(X_d_n, W, E):
-    """
-    更新 B 的正交 Procrustes 解：
-        min_{B^T B = I} || W^T X - B E^T ||_F^2
-    等价于最大化 Tr(B E^T X^T W)，
-    解为: B = U V^T，其中 U Σ V^T = E^T X^T W。
-    """
-    X = X_d_n
-    # M = E^T X^T W = (c x n)(n x d)(d x c) = (c x c)
-    M = E.T @ X.T @ W
-    U, _, Vt = np.linalg.svd(M, full_matrices=False)
-    B = U @ Vt
-    return B
+    obj = np.linalg.norm((W.T @ X) - (B @ E.T), ord="fro") ** 2
+    obj += alpha * np.trace(W.T @ Lw @ W)
+    obj += beta * (np.trace(W.T @ Da @ W) - np.linalg.norm(W, 2))
+    obj += gamma * np.trace(W.T @ X @ Ls @ X.T @ W)
+    obj += delta * (np.linalg.norm(E - Z, ord="fro") ** 2)
+    return abs(float(obj)), W, E, B, Z
 
 
-def l21_norm(W, eps=1e-12):
-    row_norm = np.sqrt(np.sum(W**2, axis=1) + eps)
-    return np.sum(row_norm)
+def GOD_cPSO_optimization(
+    X1: np.ndarray,
+    n_class: int,
+    m: int,
+    NIter: int,
+    sizepop: int,
+    lb: float,
+    ub: float,
+    Dim: int,
+    Vmax: float,
+    Vmin: float,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float, np.ndarray, np.ndarray]:
+    wmax = 0.9
+    wmin = 0.1
+    c1 = 2
+    c2 = 2
+
+    nFeat, nSamp = X1.shape
+
+    best_W = np.ones((nFeat, n_class))
+    best_B = np.random.rand(n_class, n_class)
+    best_E = np.random.rand(nSamp, n_class)
+    best_Z = np.random.rand(nSamp, n_class)
+
+    options = {
+        "NeighborMode": "KNN",
+        "k": 5,
+        "t": 1e4,
+        "WeightMode": "Heatkernel",
+    }
+
+    S1 = constructW(X1.T, options)
+    Ds = np.diag(np.sum(S1, axis=1))
+    Ls = Ds - S1
+
+    S2 = constructW(X1, options)
+    D2 = np.diag(np.sum(S2, axis=1))
+    Lw = D2 - S2
+
+    Wi = np.sqrt(np.sum(best_W * best_W, axis=1) + EPS)
+    d = 0.5 / Wi
+    Da = np.diag(d)
+
+    if np.size(ub) == 1:
+        ub = np.full(Dim, ub)
+        lb = np.full(Dim, lb)
+
+    Range = np.ones((sizepop, 1)) * (ub - lb)
+    pop = np.random.rand(sizepop, Dim) * Range + np.ones((sizepop, 1)) * lb
+    V = np.random.rand(sizepop, Dim) * (Vmax - Vmin) + Vmin
+
+    fitness = np.zeros(sizepop)
+    Wa = np.zeros((nFeat, n_class, sizepop))
+    Ea = np.zeros((nSamp, n_class, sizepop))
+    Ba = np.zeros((n_class, n_class, sizepop))
+    Za = np.zeros((nSamp, n_class, sizepop))
+
+    for i in range(sizepop):
+        fitness[i], Wa[:, :, i], Ea[:, :, i], Ba[:, :, i], Za[:, :, i] = optimization1(
+            best_W, X1, best_E, best_B, best_Z, Da, Ls, Lw, n_class, pop[i, 0], pop[i, 1], pop[i, 2], pop[i, 3]
+        )
+
+    bestindex = int(np.argmin(fitness))
+    zbest = pop[bestindex, :].copy()
+    gbest = pop.copy()
+    fitnessgbest = fitness.copy()
+    fitnesszbest = float(fitness[bestindex])
+
+    best_W = Wa[:, :, bestindex].copy()
+    best_E = Ea[:, :, bestindex].copy()
+    best_B = Ba[:, :, bestindex].copy()
+    best_Z = Za[:, :, bestindex].copy()
+
+    curve = np.zeros(NIter)
+    curve1 = np.zeros((NIter, Dim))
+
+    for iter_idx in range(NIter):
+        Wi = np.sqrt(np.sum(best_W * best_W, axis=1) + EPS)
+        d = 0.5 / Wi
+        Da = np.diag(d)
+        w = wmax - (wmax - wmin) * (iter_idx + 1) / NIter
+        for j in range(sizepop):
+            V[j, :] = w * V[j, :] + c1 * np.random.rand() * (gbest[j, :] - pop[j, :]) + c2 * np.random.rand() * (
+                zbest - pop[j, :]
+            )
+            if np.any(V[j, :] > Vmax):
+                V[j, :] = Vmax
+            if np.any(V[j, :] < Vmin):
+                V[j, :] = Vmin
+            pop[j, :] = pop[j, :] + V[j, :]
+            pop[j, :] = np.minimum(np.maximum(pop[j, :], lb), ub)
+
+            fitness[j], Wa[:, :, j], Ea[:, :, j], Ba[:, :, j], Za[:, :, j] = optimization1(
+                best_W,
+                X1,
+                best_E,
+                best_B,
+                best_Z,
+                Da,
+                Ls,
+                Lw,
+                n_class,
+                pop[j, 0],
+                pop[j, 1],
+                pop[j, 2],
+                pop[j, 3],
+            )
+
+            if fitness[j] < fitnessgbest[j]:
+                gbest[j, :] = pop[j, :]
+                fitnessgbest[j] = fitness[j]
+            if fitness[j] < fitnesszbest:
+                zbest = pop[j, :].copy()
+                fitnesszbest = float(fitness[j])
+                best_W = Wa[:, :, j].copy()
+                best_E = Ea[:, :, j].copy()
+                best_B = Ba[:, :, j].copy()
+                best_Z = Za[:, :, j].copy()
+
+        curve[iter_idx] = fitnesszbest
+        curve1[iter_idx, :] = zbest
+
+    Best_pos = zbest
+    Best_score = fitnesszbest
+
+    score = np.sqrt(np.sum(best_W * best_W, axis=1))
+    idx = np.argsort(score)[::-1]
+    X_new1 = X1[idx[:m], :]
+    return X_new1, best_W, idx, Best_pos, Best_score, curve, curve1
 
 
-def frob_norm(W):
-    return np.sqrt(np.sum(W**2))
+def main():
+    tic = time.time()
+
+    data = loadmat("colon.mat")
+    fea = data["fea"]
+    gnd = data["gnd"].ravel()
+
+    featurenumset = 200
+    NIter = 3
+    m = featurenumset
+    nClass1 = len(np.unique(gnd))
+    SearchAgents_no = 20
+    lb = 1e-8
+    ub = 1e8
+    dim = 4
+    Vmax = 0.1 * ub
+    Vmin = 0.1 * lb
+
+    fun1 = []
+    funx = []
+    for _ in range(20):
+        X_new, W, idx, Best_pos, Best_score, curve, curve1 = GOD_cPSO_optimization(
+            fea.T, nClass1, m, NIter, SearchAgents_no, lb, ub, dim, Vmax, Vmin
+        )
+        fun1.append(Best_score)
+        funx.append(Best_pos)
+        print(Best_score)
+    fun1 = np.array(fun1)
+    funx = np.array(funx)
+    b = np.array([np.min(fun1), np.max(fun1), np.mean(fun1), np.std(fun1, ddof=0)])
+    c = np.mean(funx, axis=0)
+
+    X_new = X_new.T
+    resualt = []
+    for _ in range(40):
+        label, _, _, _, _ = litekmeans(X_new, nClass1, max_iter=100, replicates=10)
+        newres = bestMap(gnd, label)
+        AC = np.sum(gnd == newres) / len(gnd)
+        MIhat = MutualInfo(gnd, label)
+        resualt.append([AC, MIhat])
+    resualt = np.array(resualt)
+
+    MEAN = np.zeros((2, 2))
+    STD = np.zeros((2, 2))
+    BEST = np.zeros((2, 1))
+    for j in range(2):
+        a = resualt[:, j]
+        temp = []
+        for i in range(len(a)):
+            if i < len(a) - 18:
+                temp.append(np.sum(a[i : i + 20]))
+        temp = np.array(temp)
+        f_idx = int(np.argmax(temp))
+        e = temp[f_idx] / 20.0
+        f_matlab = f_idx + 1  # record MATLAB-style index
+        MEAN[j, :] = [e, f_matlab]
+        STD[j, :] = np.std(resualt[f_idx : f_idx + 20, j])
+        rr = np.sort(resualt[:, j])
+        BEST[j, 0] = rr[-1]
+
+    print("算法运行完毕！")
+    print("以下是AP_OCLGR算法运行得到的AR10P数据集的ACC与NMI值：")
+    print("ACC±STD%%:")
+    print(f"{MEAN[0,0]*100:.2f}\t", end="")
+    print(f"{STD[0,0]*100:.2f}")
+    print("\nNMI±STD%%:")
+    print(f"{MEAN[1,0]*100:.2f}\t", end="")
+    print(f"{STD[1,0]*100:.2f}")
+    print()
+    print(f"Elapsed: {time.time() - tic:.2f}s")
 
 
-def objective(X_d_n, W, B, E, Z, L_W, L, L_E, alpha, beta, gamma, eta):
-    """
-    目标函数 (18)：
-      ||W^T X - B E^T||_F^2
-      + beta ( ||W||_{2,1} - ||W||_2 )
-      + alpha ( Tr(W^T L_W W) + Tr(E^T L E) )
-      + gamma || W^T X L_E X^T W ||_F^2
-      + eta ||Z - E||_F^2
-    """
-    X = X_d_n
-
-    # 重构项
-    WT_X = W.T @ X        # (c, n)
-    B_Et = B @ E.T        # (c, n)
-    recon = np.sum((WT_X - B_Et)**2)
-
-    # 非凸稀疏项
-    l21 = l21_norm(W)
-    l2 = frob_norm(W)
-    sparse_term = beta * (l21 - l2)
-
-    # 图嵌入 / 几何结构项
-    term_W_graph = alpha * np.trace(W.T @ L_W @ W)
-    term_E_graph = alpha * np.trace(E.T @ L @ E)
-
-    # 局部结构保持项
-    M = W.T @ X           # (c, n)
-    N = M @ L_E @ X.T @ W # (c, c)
-    local_term = gamma * np.sum(N**2)
-
-    # Z-E 近似项
-    ze_term = eta * np.sum((Z - E)**2)
-
-    return recon + sparse_term + term_W_graph + term_E_graph + local_term + ze_term
-
-
-# ------------------------------------------------------------
-# GOD 核心：图嵌入聚类标签正交分解的特征选择 (对应 Algorithm 2)
-# ------------------------------------------------------------
-
-def god_feature_selection(
-    X,
-    n_clusters,
-    n_selected_features,
-    alpha=1.0,
-    beta=1.0,
-    gamma=1.0,
-    eta=1.0,
-    k_neighbors=5,
-    max_iter=50,
-    tol=1e-4,
-    inner_iter_E=5,
-    random_state=None,
-):
-    """
-    图嵌入正交分解 (GOD) 的核心特征选择过程。
-    X : (n_samples, n_features)
-    n_clusters : 簇个数 c
-    n_selected_features : 选取特征数 m
-    alpha, beta, gamma, eta : 论文中的四个平衡参数
-    k_neighbors : 构图时的 k
-    max_iter : GOD 迭代次数
-    tol : 基于 W 的相对收敛判据
-    inner_iter_E : 更新 E 时的内循环次数（Algorithm 1）
-    random_state : 随机种子
-    """
-    X = np.asarray(X, dtype=float)
-    n_samples, n_features = X.shape
-    d = n_features
-    n = n_samples
-    m = min(n_selected_features, n_features)
-
-    if n_clusters <= 0:
-        raise ValueError("n_clusters must be positive")
-    if m <= 0:
-        raise ValueError("n_selected_features must be positive")
-
-    rng = np.random.RandomState(random_state)
-
-    # 论文记号中的 X : d x n
-    X_d_n = X.T
-
-    # (1) 基于样本的图 S, L  (n x n)
-    S_samples = knn_graph(X, n_neighbors=k_neighbors)
-    L = laplacian(S_samples)
-
-    # (2) 基于特征的图 S_W, L_W (d x d)，用 X 的每一行（特征向量）构图
-    S_W = knn_graph(X_d_n, n_neighbors=k_neighbors)
-    L_W = laplacian(S_W)
-
-    # (3) 用 KMeans 在样本空间得到初始 E (n x c)
-    labels0 = kmeans(X, n_clusters=n_clusters, random_state=random_state)
-    E = one_hot(labels0, n_classes=n_clusters)
-
-    # (4) 在 E 上再建图（局部保持项用）S_E, L_E (n x n)
-    S_E = knn_graph(E, n_neighbors=k_neighbors)
-    L_E = laplacian(S_E)
-
-    # (5) 初始化 W (d x c), B (c x c), Z (n x c)
-    W = np.abs(rng.randn(d, n_clusters)) + 1e-6
-    Q, _ = np.linalg.qr(rng.randn(n_clusters, n_clusters))  # 随机正交矩阵
-    B = Q
-    Z = np.maximum(E, 0.0)
-
-    curve = []
-
-    for it in range(max_iter):
-        W_old = W.copy()
-
-        # ---- 更新 W (式(25)) ----
-        W = update_W(X_d_n, W, B, E, L_W, L_E, beta=beta, alpha=alpha, gamma=gamma)
-
-        # ---- 更新 E (Algorithm 1，对应式(26)-(28)) ----
-        A = alpha * L                           # (n x n)
-        # 这里把 eta 也体现在 C 中：C = 2(X W B + eta Z)
-        C = 2.0 * (X @ W @ B + eta * Z)         # (n x c)
-        E = update_E(A, C, E, n_iter=inner_iter_E)
-
-        # ---- 更新 Z (式(31)) ----
-        Z = np.maximum(E, 0.0)
-
-        # ---- 更新 B (式(19)(20)) ----
-        B = update_B(X_d_n, W, E)
-
-        # ---- 计算目标函数值 (式(18)) ----
-        obj = objective(X_d_n, W, B, E, Z, L_W, L, L_E, alpha, beta, gamma, eta)
-        curve.append(obj)
-
-        # ---- 收敛判据：W 的相对变化 ----
-        rel_change = np.linalg.norm(W - W_old) / (np.linalg.norm(W_old) + 1e-8)
-        # print(f"Iter {it:03d}: obj={obj:.4e}, rel_change={rel_change:.3e}")
-        if rel_change < tol:
-            break
-
-    # 行 l2 范数作为特征重要性得分
-    scores = np.linalg.norm(W, axis=1)
-    idx_sorted = np.argsort(-scores)
-    selected_idx = idx_sorted[:m]
-
-    Gbin = np.zeros(n_features, dtype=int)
-    Gbin[selected_idx] = 1
-
-    return Gbin, np.array(curve), W
-
-
-# ------------------------------------------------------------
-# 对外接口：fs(xtrain, xvalid, ytrain, yvalid, opts)
-# ------------------------------------------------------------
-
-def fs(xtrain, xvalid, ytrain, yvalid, opts):
-    """
-    外层 wrapper，签名按你的要求：
-
-        def fs(xtrain, xvalid, ytrain, yvalid, opts):
-            return {'sf': Gbin, 'c': curve, 'nf': num_feat}
-
-    参数
-    ----
-    xtrain : (n_samples, n_features)，训练数据
-    xvalid : 验证集（本算法为无监督，未使用；保留接口兼容）
-    ytrain, yvalid : 标签（本算法不使用标签，只在 n_clusters 未指定时
-                     用 ytrain 推出簇数）
-    opts : dict，主要键：
-        - 'nf' 或 'num_features' : 选取特征数 m
-        - 'n_clusters' (可选)    : 簇数 c；若缺省且 ytrain 不为 None，则用
-                                  len(np.unique(ytrain))
-        - 'alpha', 'beta', 'gamma', 'eta' (可选) : GOD 的 4 个权重
-        - 'k_neighbors', 'max_iter', 'tol', 'inner_iter_E', 'random_state' (可选)
-
-    返回
-    ----
-    dict:
-        'sf' : 二值选择向量 (n_features,)
-        'c'  : 目标函数值曲线 (n_iter,)
-        'nf' : 实际选中特征数
-    """
-    Xtr = np.asarray(xtrain, dtype=float)
-    n_samples, n_features = Xtr.shape
-
-    # 选取特征数
-    if 'nf' in opts:
-        n_selected = int(opts['nf'])
-    elif 'num_features' in opts:
-        n_selected = int(opts['num_features'])
-    else:
-        n_selected = n_features   # 默认保留全部
-
-    # 簇数：优先从 opts['n_clusters']，否则用 ytrain 推断
-    if 'n_clusters' in opts:
-        n_clusters = int(opts['n_clusters'])
-    else:
-        if ytrain is None:
-            raise ValueError("n_clusters not provided in opts and ytrain is None.")
-        ytr = np.asarray(ytrain)
-        n_clusters = int(len(np.unique(ytr)))
-
-    alpha = float(opts.get('alpha', 1.0))
-    beta = float(opts.get('beta', 1.0))
-    gamma = float(opts.get('gamma', 1.0))
-    eta = float(opts.get('eta', 1.0))
-    k_neighbors = int(opts.get('k_neighbors', 5))
-    max_iter = int(opts.get('max_iter', 50))
-    tol = float(opts.get('tol', 1e-4))
-    inner_iter_E = int(opts.get('inner_iter_E', 5))
-    random_state = opts.get('random_state', None)
-
-    Gbin, curve, W = god_feature_selection(
-        Xtr,
-        n_clusters=n_clusters,
-        n_selected_features=n_selected,
-        alpha=alpha,
-        beta=beta,
-        gamma=gamma,
-        eta=eta,
-        k_neighbors=k_neighbors,
-        max_iter=max_iter,
-        tol=tol,
-        inner_iter_E=inner_iter_E,
-        random_state=random_state,
-    )
-
-    num_feat = int(Gbin.sum())
-
-    return {'sf': Gbin, 'c': curve, 'nf': num_feat}
+if __name__ == "__main__":
+    main()
