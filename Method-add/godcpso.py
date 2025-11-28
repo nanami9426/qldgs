@@ -13,6 +13,10 @@ from typing import Dict, Iterable, Optional, Tuple
 import numpy as np
 from scipy.io import loadmat
 from scipy.optimize import linear_sum_assignment
+try:
+    from sklearn.cluster import KMeans
+except Exception:  # sklearn may be unavailable
+    KMeans = None
 
 EPS = np.finfo(float).eps
 
@@ -154,10 +158,13 @@ def MutualInfo(L1: np.ndarray, L2: np.ndarray) -> float:
         L1 = np.concatenate([L1, Label2])
         L2 = np.concatenate([L2, Label2])
 
+    Label = np.unique(L1)
+    nClass = len(Label)
+
+    idx1 = np.searchsorted(Label, L1)
+    idx2 = np.searchsorted(Label, L2)
     G = np.zeros((nClass, nClass))
-    for i, lab1 in enumerate(Label):
-        for j, lab2 in enumerate(Label):
-            G[i, j] = np.sum((L1 == lab1) & (L2 == lab2))
+    np.add.at(G, (idx1, idx2), 1)
     sumG = np.sum(G)
 
     P1 = np.sum(G, axis=1) / sumG
@@ -201,10 +208,10 @@ def bestMap(L1: np.ndarray, L2: np.ndarray) -> np.ndarray:
     nClass2 = len(Label2)
 
     nClass = max(nClass1, nClass2)
+    idx1 = np.searchsorted(Label1, L1)
+    idx2 = np.searchsorted(Label2, L2)
     G = np.zeros((nClass, nClass))
-    for i in range(nClass1):
-        for j in range(nClass2):
-            G[i, j] = np.sum((L1 == Label1[i]) & (L2 == Label2[j]))
+    np.add.at(G, (idx1, idx2), 1)
 
     c, _ = hungarian(-G)
     newL2 = np.zeros_like(L2)
@@ -292,9 +299,11 @@ def litekmeans(
                     idx = np.argsort(val)[::-1]
                     label[idx[: len(miss_cluster)]] = miss_cluster
 
-                E = np.zeros((n, k))
-                E[np.arange(n), label - 1] = 1
-                center = (E.T @ X) / (E.sum(axis=0)[:, None] + EPS)
+                counts = np.bincount(label - 1, minlength=k).astype(float)
+                center = np.zeros((k, p))
+                for cls in range(k):
+                    if counts[cls] > 0:
+                        center[cls] = X[label == (cls + 1)].sum(axis=0) / counts[cls]
                 it += 1
             bCon = it < max_iter
             aa = np.sum(X * X, axis=1)
@@ -316,9 +325,11 @@ def litekmeans(
                     idx = np.argsort(val)
                     label[idx[: len(miss_cluster)]] = miss_cluster
 
-                E = np.zeros((n, k))
-                E[np.arange(n), label - 1] = 1
-                center = (E.T @ X) / (E.sum(axis=0)[:, None] + EPS)
+                counts = np.bincount(label - 1, minlength=k).astype(float)
+                center = np.zeros((k, p))
+                for cls in range(k):
+                    if counts[cls] > 0:
+                        center[cls] = X[label == (cls + 1)].sum(axis=0) / counts[cls]
                 center = NormalizeFea(center)
                 it += 1
             bCon = it < max_iter
@@ -350,26 +361,33 @@ def optimization1(
     beta: float,
     gamma: float,
     delta: float,
+    *,
+    XTX: Optional[np.ndarray] = None,
+    XLsXT: Optional[np.ndarray] = None,
+    lambda_max_Ls: Optional[float] = None,
 ) -> Tuple[float, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     nFeat, nSamp = X.shape
+    if XTX is None:
+        XTX = X @ X.T
+    if XLsXT is None:
+        XLsXT = X @ Ls @ X.T
     numerator = X @ E @ B.T + 0.5 * beta * (np.trace(W @ W.T) ** -0.5) * W
-    denominator = (X @ X.T @ W) + beta * (Da @ W) + gamma * (X @ Ls @ X.T @ W) + alpha * (Lw @ W) + EPS
+    denominator = (XTX @ W) + beta * (Da @ W) + gamma * (XLsXT @ W) + alpha * (Lw @ W) + EPS
     W = W * (numerator / denominator)
 
     T1 = E.T @ X.T @ W
-    U_b, _, Vh_b = np.linalg.svd(T1, full_matrices=True)
+    U_b, _, Vh_b = np.linalg.svd(T1, full_matrices=False)
     B = Vh_b.T @ U_b.T
 
-    AA = alpha * Ls
-    try:
-        eigvals = np.linalg.eigvalsh(AA)
-    except np.linalg.LinAlgError:
-        eigvals = np.linalg.eigvals(AA).real
-    u1 = float(np.max(eigvals))
-    AA1 = u1 * np.eye(nSamp) - AA
+    if lambda_max_Ls is None:
+        try:
+            lambda_max_Ls = float(np.linalg.eigvalsh(Ls).max())
+        except np.linalg.LinAlgError:
+            lambda_max_Ls = float(np.linalg.eigvals(Ls).real.max())
+    AA1 = alpha * (lambda_max_Ls * np.eye(nSamp) - Ls)
     B1 = 2 * (X.T @ W @ B) + 2 * delta * Z
     P = AA1 @ E + 0.5 * B1
-    U_m, _, Vh_m = np.linalg.svd(P, full_matrices=True)
+    U_m, _, Vh_m = np.linalg.svd(P, full_matrices=False)
     E = U_m[:, :n_class] @ Vh_m[:n_class, :]
 
     Z = np.maximum(E, 0)
@@ -421,6 +439,14 @@ def GOD_cPSO_optimization(
     D2 = np.diag(np.sum(S2, axis=1))
     Lw = D2 - S2
 
+    # Precompute invariant matrices to avoid repeated large multiplications.
+    XTX = X1 @ X1.T
+    XLsXT = X1 @ Ls @ X1.T
+    try:
+        lambda_max_Ls = float(np.linalg.eigvalsh(Ls).max())
+    except np.linalg.LinAlgError:
+        lambda_max_Ls = float(np.linalg.eigvals(Ls).real.max())
+
     Wi = np.sqrt(np.sum(best_W * best_W, axis=1) + EPS)
     d = 0.5 / Wi
     Da = np.diag(d)
@@ -441,7 +467,22 @@ def GOD_cPSO_optimization(
 
     for i in range(sizepop):
         fitness[i], Wa[:, :, i], Ea[:, :, i], Ba[:, :, i], Za[:, :, i] = optimization1(
-            best_W, X1, best_E, best_B, best_Z, Da, Ls, Lw, n_class, pop[i, 0], pop[i, 1], pop[i, 2], pop[i, 3]
+            best_W,
+            X1,
+            best_E,
+            best_B,
+            best_Z,
+            Da,
+            Ls,
+            Lw,
+            n_class,
+            pop[i, 0],
+            pop[i, 1],
+            pop[i, 2],
+            pop[i, 3],
+            XTX=XTX,
+            XLsXT=XLsXT,
+            lambda_max_Ls=lambda_max_Ls,
         )
 
     bestindex = int(np.argmin(fitness))
@@ -467,12 +508,8 @@ def GOD_cPSO_optimization(
             V[j, :] = w * V[j, :] + c1 * np.random.rand() * (gbest[j, :] - pop[j, :]) + c2 * np.random.rand() * (
                 zbest - pop[j, :]
             )
-            if np.any(V[j, :] > Vmax):
-                V[j, :] = Vmax
-            if np.any(V[j, :] < Vmin):
-                V[j, :] = Vmin
-            pop[j, :] = pop[j, :] + V[j, :]
-            pop[j, :] = np.minimum(np.maximum(pop[j, :], lb), ub)
+            V[j, :] = np.clip(V[j, :], Vmin, Vmax)
+            pop[j, :] = np.clip(pop[j, :] + V[j, :], lb, ub)
 
             fitness[j], Wa[:, :, j], Ea[:, :, j], Ba[:, :, j], Za[:, :, j] = optimization1(
                 best_W,
@@ -488,6 +525,9 @@ def GOD_cPSO_optimization(
                 pop[j, 1],
                 pop[j, 2],
                 pop[j, 3],
+                XTX=XTX,
+                XLsXT=XLsXT,
+                lambda_max_Ls=lambda_max_Ls,
             )
 
             if fitness[j] < fitnessgbest[j]:
@@ -548,7 +588,11 @@ def main():
     X_new = X_new.T
     resualt = []
     for _ in range(40):
-        label, _, _, _, _ = litekmeans(X_new, nClass1, max_iter=100, replicates=10)
+        if KMeans is not None:
+            km = KMeans(n_clusters=nClass1, n_init=10, max_iter=100, algorithm="lloyd")
+            label = km.fit_predict(X_new) + 1  # 1-based to match MATLAB output
+        else:
+            label, _, _, _, _ = litekmeans(X_new, nClass1, max_iter=100, replicates=10)
         newres = bestMap(gnd, label)
         AC = np.sum(gnd == newres) / len(gnd)
         MIhat = MutualInfo(gnd, label)
