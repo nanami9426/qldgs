@@ -1,6 +1,7 @@
 import os
 import sys
 import time
+import datetime
 import importlib
 import warnings
 
@@ -13,6 +14,7 @@ from sklearn.exceptions import DataConversionWarning
 
 from CCM import calculate_metrics
 from Function import classifier_method
+from Save import append_to_csv
 
 
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -59,12 +61,20 @@ def determine_fold_count(labels, desired_folds):
     return folds, min_class_samples
 
 
-def run_cross_validation(data_name, method_list, base_opts, desired_folds):
+def run_cross_validation(
+    data_name,
+    method_list,
+    base_opts,
+    desired_folds,
+    current_date,
+    output_dir="Result",
+    file_prefix="cv",
+):
     path = "Dataset"
     data_path = os.path.join(path, f"{data_name}.csv")
     if not os.path.exists(data_path):
         print(f"未找到数据集文件：{data_path}")
-        return
+        return []
 
     data = pd.read_csv(data_path)
     X = data.iloc[:, :-1].values.copy()
@@ -83,7 +93,7 @@ def run_cross_validation(data_name, method_list, base_opts, desired_folds):
         print(
             f"数据集【{data_name}】存在样本量少于2的类别或无法划分足够的折数，跳过该数据集。"
         )
-        return
+        return []
     if folds < desired_folds:
         print(
             f"数据集【{data_name}】最小类别样本数为{min_class_sample}，使用{folds}折交叉验证代替{desired_folds}折。"
@@ -97,8 +107,16 @@ def run_cross_validation(data_name, method_list, base_opts, desired_folds):
     skf = StratifiedKFold(n_splits=folds, shuffle=True, random_state=42)
     fold_indices = list(skf.split(X, Y))
 
+    method_num = len(method_list)
+    result_list = []
+    result_curve = []
+    result_run = []
+    result_run_best = np.zeros((runs, method_num))
+    result_run_best_name = np.array([[data_name] for _ in range(runs)], dtype=object)
+    results = {data_name: {}}
     dataset_rows = []
-    for method in method_list:
+
+    for method_idx, method in enumerate(method_list):
         sf = np.zeros((runs, dim))
         nf = np.zeros((runs, 1))
         curve = np.zeros((runs, opts["T"]))
@@ -220,6 +238,26 @@ def run_cross_validation(data_name, method_list, base_opts, desired_folds):
                 precision_test_metrics = calculate_metrics(Y_test, pred_test, metric="precision")
                 precision_test[fold_idx, 0] = precision_test_metrics["Precision (Macro)"]
 
+            run_result = {
+                "Data Name": data_name,
+                "Folds": folds,
+                "Method": method,
+                "Run": fold_idx + 1,
+                "Feature Number": nf[fold_idx, 0],
+                "Time Calculation": timecal[fold_idx, 0],
+                "Accuracy Valid": acc_valid[fold_idx, 0],
+                "Accuracy Test": acc_test[fold_idx, 0],
+                "F1 Valid": f1_valid[fold_idx, 0],
+                "F1 Test": f1_test[fold_idx, 0],
+                "AUC Valid": auc_valid[fold_idx, 0],
+                "AUC Test": auc_test[fold_idx, 0],
+                "Recall Valid": recall_valid[fold_idx, 0],
+                "Recall Test": recall_test[fold_idx, 0],
+                "Precision Valid": precision_valid[fold_idx, 0],
+                "Precision Test": precision_test[fold_idx, 0],
+            }
+            result_run.append(run_result)
+
         if not method_has_runs:
             continue
 
@@ -309,13 +347,151 @@ def run_cross_validation(data_name, method_list, base_opts, desired_folds):
         }
         dataset_rows.append(row)
 
+        result_list.append(
+            [
+                data_name,
+                folds,
+                method,
+                nf_mean,
+                nf_std,
+                acc_test_best,
+                acc_test_mean,
+                acc_test_std,
+                acc_test_min,
+                f1_test_mean,
+                auc_test_mean,
+                recall_test_mean,
+                precision_test_mean,
+                timecal_mean,
+            ]
+        )
+        result_curve.append([data_name, method] + curve_mean.tolist()[0])
+        result_run_best[:, method_idx] = acc_test[:, 0]
+        results[data_name][method] = {
+            "sf": sf,
+            "nf": nf,
+            "timecal": timecal,
+            "acc_valid": acc_valid,
+            "acc_test": acc_test,
+            "f1_valid": f1_valid,
+            "f1_test": f1_test,
+            "auc_valid": auc_valid,
+            "auc_test": auc_test,
+            "valid_result": valid_result,
+            "test_result": test_result,
+            "curve_mean": curve_mean,
+        }
+
         print(
             f"【{data_name}】【{method:<8}】NF: {nf_mean:.2f} ;   1-Fitness: {1 - fitness_mean:.2f} ;   "
             f"Acc_test: {acc_test_mean:.2f} ± {acc_test_std:.2f} ;   F1_test: {f1_test_mean * 100:.2f}% ;  "
             f"Auc_test:{auc_test_mean * 100:.2f}% ;  Time: {timecal_mean:.2f}"
         )
 
+    if result_list:
+        save_cv_results(
+            data_name,
+            folds,
+            method_list,
+            result_list,
+            result_curve,
+            result_run,
+            result_run_best,
+            result_run_best_name,
+            current_date,
+            output_dir,
+            file_prefix,
+        )
+
     return dataset_rows
+
+
+def save_cv_results(
+    data_name,
+    folds,
+    methodset,
+    result_list,
+    result_curve,
+    result_run,
+    result_run_best,
+    result_run_best_name,
+    current_date,
+    output_dir="Result",
+    file_prefix="cv",
+):
+    if not result_list:
+        print(f"【{data_name}】无可保存的交叉验证结果。")
+        return
+
+    os.makedirs(output_dir, exist_ok=True)
+    result_data = np.array(result_list, dtype=object)
+    result_curve_arr = np.array(result_curve, dtype=object)
+    result_best = np.concatenate((result_run_best_name, result_run_best), axis=1)
+    result_run_data = np.array(
+        [
+            [
+                item.get("Data Name"),
+                item.get("Folds"),
+                item.get("Method"),
+                item.get("Run"),
+                item.get("Feature Number"),
+                item.get("Time Calculation"),
+                item.get("Accuracy Valid"),
+                item.get("Accuracy Test"),
+                item.get("F1 Valid"),
+                item.get("F1 Test"),
+                item.get("AUC Valid"),
+                item.get("AUC Test"),
+            ]
+            for item in result_run
+        ],
+        dtype=object,
+    )
+
+    result_data_header = [
+        "Data Name",
+        "Folds",
+        "Method",
+        "NF Mean",
+        "NF Std",
+        "Accuracy Test Best",
+        "Accuracy Test Mean",
+        "Accuracy Test Std",
+        "Accuracy Test Min",
+        "F1 Test Mean",
+        "AUC Test Mean",
+        "Recall Test Mean",
+        "Precision Test Mean",
+        "Timecal Mean",
+    ]
+    result_best_header = ["Data Name"] + methodset
+    result_run_data_header = [
+        "Data Name",
+        "Folds",
+        "Method",
+        "Run",
+        "Feature Number",
+        "Time Calculation",
+        "Accuracy Valid",
+        "Accuracy Test",
+        "F1 Valid",
+        "F1 Test",
+        "AUC Valid",
+        "AUC Test",
+    ]
+
+    prefix = f"{file_prefix}_" if file_prefix else ""
+    data_save_path = os.path.join(output_dir, f"{prefix}result_{current_date}.csv")
+    curve_save_path = os.path.join(output_dir, f"{prefix}result_curve_{current_date}.csv")
+    best_save_path = os.path.join(output_dir, f"{prefix}result_best_{current_date}.csv")
+    run_save_path = os.path.join(output_dir, f"{prefix}result_run_{current_date}.csv")
+
+    append_to_csv(data_save_path, result_data, delimiter=",", header=result_data_header)
+    append_to_csv(curve_save_path, result_curve_arr, delimiter=",", header=None)
+    append_to_csv(best_save_path, result_best, delimiter=",", header=result_best_header)
+    append_to_csv(run_save_path, result_run_data, delimiter=",", header=result_run_data_header)
+
+    print(f"【{data_name}】交叉验证结果已保存到 {output_dir} (文件前缀: {prefix or '无'})")
 
 
 def save_results_to_csv(rows, output_dir="Result", file_name="cross_validation_results.csv"):
@@ -410,12 +586,20 @@ def main():
         "func": func,
         "knn_para": 3,
     }
-    all_rows = []
+    # current_date = datetime.datetime.now().strftime("%m-%d")
+    current_date = "11"
+    output_dir = "Result"
+    file_prefix = "cv"
     for data_name in dataset:
-        dataset_rows = run_cross_validation(data_name, methodset, opts, desired_folds)
-        if dataset_rows:
-            all_rows.extend(dataset_rows)
-    save_results_to_csv(all_rows)
+        run_cross_validation(
+            data_name,
+            methodset,
+            opts,
+            desired_folds,
+            current_date,
+            output_dir=output_dir,
+            file_prefix=file_prefix,
+        )
 
 
 if __name__ == "__main__":
