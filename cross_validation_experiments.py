@@ -391,7 +391,7 @@ def main():
     dataset = [filename.rstrip(".csv") for filename in dataset]
     # methodset = ['QLDGS-PSO-Elite', "QLDGS-PSO", 'FTMGWO', 'FESSA', 'SFE', 'PSO', 'BBPSO', 'VLPSO', 'SFEPSO']
     # methodset = ['rlpsoasm', 'QLDGS-PSO', 'QLDGS-PSO-Elite']
-    methodset = ['godcpso']
+    methodset = ['rlpsoasm']
     desired_folds = 5
     runs = desired_folds
     N = 20

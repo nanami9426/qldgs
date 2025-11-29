@@ -7,16 +7,11 @@ The goal is to mirror the original logic and produce equivalent results.
 from __future__ import annotations
 
 import math
-import time
 from typing import Dict, Iterable, Optional, Tuple
 
 import numpy as np
-from scipy.io import loadmat
 from scipy.optimize import linear_sum_assignment
-try:
-    from sklearn.cluster import KMeans
-except Exception:  # sklearn may be unavailable
-    KMeans = None
+from Function import Fun
 
 EPS = np.finfo(float).eps
 
@@ -403,7 +398,7 @@ def optimization1(
 def GOD_cPSO_optimization(
     X1: np.ndarray,
     n_class: int,
-    m: int,
+    m: Optional[int],
     NIter: int,
     sizepop: int,
     lb: float,
@@ -418,6 +413,9 @@ def GOD_cPSO_optimization(
     c2 = 2
 
     nFeat, nSamp = X1.shape
+    if m is None:
+        m = nFeat
+    m = int(max(1, min(nFeat, m)))
 
     best_W = np.ones((nFeat, n_class))
     best_B = np.random.rand(n_class, n_class)
@@ -553,81 +551,86 @@ def GOD_cPSO_optimization(
     return X_new1, best_W, idx, Best_pos, Best_score, curve, curve1
 
 
-def main():
-    tic = time.time()
+def _candidate_feature_sizes(dim: int, opts: Dict) -> list[int]:
+    """
+    Build a small set of candidate subset sizes so we can search for the best
+    feature count instead of relying on the old fixed featurenumset parameter.
+    """
+    explicit = opts.get("featurenumset")
+    if explicit is None:
+        explicit = opts.get("feat_num", opts.get("k", None))
+    if explicit is not None:
+        try:
+            size = int(explicit)
+        except (TypeError, ValueError):
+            size = dim
+        return [max(1, min(dim, size))]
 
-    data = loadmat("colon.mat")
-    fea = data["fea"]
-    gnd = data["gnd"].ravel()
-
-    featurenumset = 200
-    NIter = 3
-    m = featurenumset
-    nClass1 = len(np.unique(gnd))
-    SearchAgents_no = 20
-    lb = 1e-8
-    ub = 1e8
-    dim = 4
-    Vmax = 0.1 * ub
-    Vmin = 0.1 * lb
-
-    fun1 = []
-    funx = []
-    for _ in range(20):
-        X_new, W, idx, Best_pos, Best_score, curve, curve1 = GOD_cPSO_optimization(
-            fea.T, nClass1, m, NIter, SearchAgents_no, lb, ub, dim, Vmax, Vmin
-        )
-        fun1.append(Best_score)
-        funx.append(Best_pos)
-        print(Best_score)
-    fun1 = np.array(fun1)
-    funx = np.array(funx)
-    b = np.array([np.min(fun1), np.max(fun1), np.mean(fun1), np.std(fun1, ddof=0)])
-    c = np.mean(funx, axis=0)
-
-    X_new = X_new.T
-    resualt = []
-    for _ in range(40):
-        if KMeans is not None:
-            km = KMeans(n_clusters=nClass1, n_init=10, max_iter=100, algorithm="lloyd")
-            label = km.fit_predict(X_new) + 1  # 1-based to match MATLAB output
-        else:
-            label, _, _, _, _ = litekmeans(X_new, nClass1, max_iter=100, replicates=10)
-        newres = bestMap(gnd, label)
-        AC = np.sum(gnd == newres) / len(gnd)
-        MIhat = MutualInfo(gnd, label)
-        resualt.append([AC, MIhat])
-    resualt = np.array(resualt)
-
-    MEAN = np.zeros((2, 2))
-    STD = np.zeros((2, 2))
-    BEST = np.zeros((2, 1))
-    for j in range(2):
-        a = resualt[:, j]
-        temp = []
-        for i in range(len(a)):
-            if i < len(a) - 18:
-                temp.append(np.sum(a[i : i + 20]))
-        temp = np.array(temp)
-        f_idx = int(np.argmax(temp))
-        e = temp[f_idx] / 20.0
-        f_matlab = f_idx + 1  # record MATLAB-style index
-        MEAN[j, :] = [e, f_matlab]
-        STD[j, :] = np.std(resualt[f_idx : f_idx + 20, j])
-        rr = np.sort(resualt[:, j])
-        BEST[j, 0] = rr[-1]
-
-    print("算法运行完毕！")
-    print("以下是AP_OCLGR算法运行得到的AR10P数据集的ACC与NMI值：")
-    print("ACC±STD%%:")
-    print(f"{MEAN[0,0]*100:.2f}\t", end="")
-    print(f"{STD[0,0]*100:.2f}")
-    print("\nNMI±STD%%:")
-    print(f"{MEAN[1,0]*100:.2f}\t", end="")
-    print(f"{STD[1,0]*100:.2f}")
-    print()
-    print(f"Elapsed: {time.time() - tic:.2f}s")
+    ratios = opts.get("feature_ratio_list", (0.1, 0.2, 0.3, 0.5))
+    sizes = {
+        max(1, min(dim, int(math.ceil(dim * float(r))))) for r in ratios if r is not None and r > 0
+    }
+    sizes.add(max(1, int(math.sqrt(dim))))
+    sizes.add(max(1, min(dim, int(dim * 0.25))))
+    sizes.add(max(1, min(dim, int(dim * 0.4))))
+    sizes = sorted(sizes)
+    if not sizes:
+        sizes = [max(1, min(dim, int(math.sqrt(dim))))]
+    return sizes
 
 
-if __name__ == "__main__":
-    main()
+def fs(xtrain, xvalid, ytrain, yvalid, opts=None):
+    """
+    GOD-cPSO feature selector aligned with the project interface.
+    Returns a dict with binary selection vector, convergence curve, and count.
+    """
+    if opts is None:
+        opts = {}
+    opts = dict(opts)
+
+    seed = opts.get("random_seed", None)
+    if seed is not None:
+        np.random.seed(seed)
+
+    X_all = np.vstack((xtrain, xvalid))
+    y_all = np.concatenate((ytrain, yvalid))
+    n_class = len(np.unique(y_all))
+    dim = X_all.shape[1]
+
+    NIter = int(opts.get("T", 20))
+    sizepop = int(opts.get("N", 20))
+    lb = float(opts.get("lb", 1e-8))
+    ub = float(opts.get("ub", 1e8))
+    dim_param = 4
+    Vmax = float(opts.get("Vmax", 0.1 * ub))
+    Vmin = float(opts.get("Vmin", 0.1 * lb))
+
+    candidate_sizes = _candidate_feature_sizes(dim, opts)
+
+    _, _, idx, _, _, curve, _ = GOD_cPSO_optimization(
+        X_all.T, n_class, None, NIter, sizepop, lb, ub, dim_param, Vmax, Vmin
+    )
+
+    best_mask = None
+    best_k = None
+    best_cost = float("inf")
+    opts_eval = dict(opts)
+    opts_eval["dim"] = dim
+    for k in candidate_sizes:
+        mask = np.zeros(dim, dtype=int)
+        mask[idx[:k]] = 1
+        try:
+            cost = Fun(xtrain, xvalid, ytrain, yvalid, mask, opts_eval)
+        except Exception:
+            cost = float("inf")
+        if cost < best_cost:
+            best_cost = cost
+            best_mask = mask
+            best_k = k
+
+    if best_mask is None:
+        best_k = candidate_sizes[0]
+        best_mask = np.zeros(dim, dtype=int)
+        best_mask[idx[:best_k]] = 1
+
+    return {"sf": best_mask, "c": curve, "nf": int(best_k)}
