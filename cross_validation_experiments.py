@@ -551,10 +551,10 @@ def main():
     sys.path.append("Method-add")
 
     dataset = [
-        "Leukemia2",
         "Colon",
-        "T9",
         "BT1",
+        "Leukemia2",
+        "T9",
         "BreastGCE",
         "T11",
         "CNS",
@@ -567,7 +567,7 @@ def main():
     dataset = [filename.rstrip(".csv") for filename in dataset]
     # methodset = ['QLDGS-PSO-Elite', "QLDGS-PSO", 'FTMGWO', 'FESSA', 'SFE', 'PSO', 'BBPSO', 'VLPSO', 'SFEPSO']
     # methodset = ['rlpsoasm', 'QLDGS-PSO', 'QLDGS-PSO-Elite']
-    methodset = ['rlpsoasm']
+    methodset = ['rlpsoasm', "tmgwo", "essa", "SFE", "PSO", "BBPSO", "VLPSO", "SFEPSO", "QLDGS-PSO", "QLDGS-PSO-Elite"]
     desired_folds = 5
     runs = desired_folds
     N = 20
