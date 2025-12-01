@@ -104,7 +104,7 @@ def run_cross_validation(
     opts["maxLt"] = runs
     print(f"数据集【{data_name}】，样本数量：{sample}；特征数量：{dim}；折数：{folds}")
 
-    skf = StratifiedKFold(n_splits=folds, shuffle=True, random_state=42)
+    skf = StratifiedKFold(n_splits=folds, shuffle=True, random_state=int(time.time()))
     fold_indices = list(skf.split(X, Y))
 
     method_num = len(method_list)
@@ -152,7 +152,7 @@ def run_cross_validation(
             Y_valid = Y[test_index]
             X_test = X_valid.copy()
             Y_test = Y_valid.copy()
-            opts["random_seed"] = fold_idx
+            opts["random_seed"] = int(time.time())
 
             start_time = time.time()
             FS = fs_method(X_train.copy(), X_valid.copy(), Y_train.copy(), Y_valid.copy(), opts)
@@ -551,24 +551,25 @@ def main():
     sys.path.append("Method-add")
 
     dataset = [
-        "Colon",
-        "BT1",
-        "Leukemia2",
-        "T9",
-        "BreastGCE",
-        "T11",
-        "CNS",
-        "LKM1",
-        "Prostate",
-        "LKM2",
+        # "Colon",
+        # "BT1",
+        # "Leukemia2",
+        # "T9",
+        # "BreastGCE",
+        # "T11",
+        # "CNS",
+        # "LKM1",
+        # "Prostate",
+        # "LKM2",
         "CML treatment",
-        "ALL_AML_4",
+        # "ALL_AML_4",
     ]
     dataset = [filename.rstrip(".csv") for filename in dataset]
     # methodset = ['QLDGS-PSO-Elite', "QLDGS-PSO", 'FTMGWO', 'FESSA', 'SFE', 'PSO', 'BBPSO', 'VLPSO', 'SFEPSO']
     # methodset = ['rlpsoasm', 'QLDGS-PSO', 'QLDGS-PSO-Elite']
-    # methodset = ['rlpsoasm', "tmgwo", "essa", "SFE", "PSO", "BBPSO", "VLPSO", "SFEPSO", "QLDGS-PSO", "QLDGS-PSO-Elite"]
-    methodset = ['lapsodr', "igpso"]
+    methodset = ["tmgwo", "essa", "SFE", "PSO", "BBPSO", "VLPSO", "SFEPSO", "QLDGS-PSO", "QLDGS-PSO-Elite", 'rlpsoasm', 'lapsodr', "igpso"]
+    # methodset = ['lapsodr', "igpso"]
+    # methodset = ["PSO", "BBPSO", "rlpsoasm"]
     desired_folds = 5
     runs = desired_folds
     N = 20

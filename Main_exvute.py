@@ -338,7 +338,8 @@ def main():
     # methodset = ['QLDGS-GA', 'QLDGS-PSO', 'SFEPSO', 'VLPSO', 'BBPSO', 'CUSSPSO', 'PSO', 'QBSO']
     # methodset = ['QLDGS-GA', 'QLDGS-PSO', 'SFEPSO']
     # methodset = ['rlpsoasm', 'QLDGS-PSO', 'QLDGS-PSO-Elite']
-    methodset = ['godcpso']
+    # methodset = ['godcpso']
+    methodset = ['rlpsoasm', "tmgwo", "essa", "SFE", "PSO", "BBPSO", "VLPSO", "SFEPSO", "QLDGS-PSO", "QLDGS-PSO-Elite", 'lapsodr', "igpso"]
     method_num = len(methodset)
     # 共同参数
     runs = 2  # 方法运行次数
@@ -350,7 +351,8 @@ def main():
     func = 0  # 选择不同的适应度函数
     opts = {'maxLt': runs, 'N': N, 'T': Maxiter, 'cluster':cluster,'classify': classify, 'split': split, 'func': func, 'knn_para':3}
     # 获取当前日期并格式化为字符串，例如 '06-27'
-    current_date = datetime.datetime.now().strftime("%m-%d")
+    # current_date = datetime.datetime.now().strftime("%m-%d")
+    current_date = "y"
     # max_workers为上限进程核数
     with ProcessPoolExecutor(max_workers=16) as executor:
         # 根据数据个数创建进程
