@@ -11,6 +11,7 @@ from scipy.optimize import linear_sum_assignment
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.model_selection import StratifiedKFold
 from sklearn.exceptions import DataConversionWarning
+from joblib import Parallel, delayed
 
 from CCM import calculate_metrics
 from Function import classifier_method
@@ -59,6 +60,129 @@ def determine_fold_count(labels, desired_folds):
         return 0, min_class_samples
     folds = min(desired_folds, int(min_class_samples))
     return folds, min_class_samples
+
+
+def _run_single_fold(
+    fs_method,
+    fold_idx,
+    train_index,
+    test_index,
+    X,
+    Y,
+    opts,
+    base_seed,
+    run_idx,
+):
+    print(f"\tfold_idx: {fold_idx}")
+    X_train = X[train_index]
+    Y_train = Y[train_index]
+    X_valid = X[test_index]
+    Y_valid = Y[test_index]
+    X_test = X_valid
+    Y_test = Y_valid
+    local_opts = opts.copy()
+    local_opts["random_seed"] = base_seed + run_idx * 1000 + fold_idx
+
+    start_time = time.time()
+    FS = fs_method(X_train, X_valid, Y_train, Y_valid, local_opts)
+    end_time = time.time()
+
+    selected_mask = np.asarray(FS["sf"]).reshape(-1)
+    curve = np.asarray(FS["c"]).reshape(-1)
+    nf = FS["nf"]
+    elapsed = end_time - start_time
+
+    if local_opts["classify"] == "kmeans":
+        pred_valid = classifier_method(
+            X_train[:, selected_mask == 1],
+            X_valid[:, selected_mask == 1],
+            Y_train,
+            Y_valid,
+            local_opts,
+        )
+        pred_test = classifier_method(
+            X_train[:, selected_mask == 1],
+            X_test[:, selected_mask == 1],
+            Y_train,
+            Y_valid,
+            local_opts,
+        )
+        y_all = np.concatenate((Y_train, Y_valid))
+        pred_test_map = map_labels_hungarian(y_all, pred_test)
+        pred_test = np.array([pred_test_map[label] for label in pred_test])
+        pred_valid_map = map_labels_hungarian(y_all, pred_valid)
+        pred_valid = np.array([pred_valid_map[label] for label in pred_valid])
+
+        acc_valid = calculate_metrics(y_all, pred_valid, metric="accuracy")
+        acc_test = calculate_metrics(y_all, pred_test, metric="accuracy")
+        f1_valid_metrics = calculate_metrics(y_all, pred_valid, metric="f1")
+        f1_valid = f1_valid_metrics["F1Score (Macro)"]
+        f1_test_metrics = calculate_metrics(y_all, pred_test, metric="f1")
+        f1_test = f1_test_metrics["F1Score (Macro)"]
+        auc_valid_metrics = calculate_metrics(y_all, pred_valid, metric="roc_auc")
+        auc_valid = auc_valid_metrics["ROC AUC (Macro)"]
+        auc_test_metrics = calculate_metrics(y_all, pred_test, metric="roc_auc")
+        auc_test = auc_test_metrics["ROC AUC (Macro)"]
+        recall_valid_metrics = calculate_metrics(y_all, pred_valid, metric="recall")
+        recall_valid = recall_valid_metrics["Recall (Macro)"]
+        recall_test_metrics = calculate_metrics(y_all, pred_test, metric="recall")
+        recall_test = recall_test_metrics["Recall (Macro)"]
+        precision_valid_metrics = calculate_metrics(y_all, pred_valid, metric="precision")
+        precision_valid = precision_valid_metrics["Precision (Macro)"]
+        precision_test_metrics = calculate_metrics(y_all, pred_test, metric="precision")
+        precision_test = precision_test_metrics["Precision (Macro)"]
+    else:
+        pred_valid = classifier_method(
+            X_train[:, selected_mask == 1],
+            X_valid[:, selected_mask == 1],
+            Y_train,
+            Y_valid,
+            local_opts,
+        )
+        pred_test = classifier_method(
+            X_train[:, selected_mask == 1],
+            X_test[:, selected_mask == 1],
+            Y_train,
+            Y_valid,
+            local_opts,
+        )
+
+        acc_valid = calculate_metrics(Y_valid, pred_valid, metric="accuracy")
+        acc_test = calculate_metrics(Y_test, pred_test, metric="accuracy")
+        f1_valid_metrics = calculate_metrics(Y_valid, pred_valid, metric="f1")
+        f1_valid = f1_valid_metrics["F1Score (Macro)"]
+        f1_test_metrics = calculate_metrics(Y_test, pred_test, metric="f1")
+        f1_test = f1_test_metrics["F1Score (Macro)"]
+        auc_valid_metrics = calculate_metrics(Y_valid, pred_valid, metric="roc_auc")
+        auc_valid = auc_valid_metrics["ROC AUC (Macro)"]
+        auc_test_metrics = calculate_metrics(Y_test, pred_test, metric="roc_auc")
+        auc_test = auc_test_metrics["ROC AUC (Macro)"]
+        recall_valid_metrics = calculate_metrics(Y_valid, pred_valid, metric="recall")
+        recall_valid = recall_valid_metrics["Recall (Macro)"]
+        recall_test_metrics = calculate_metrics(Y_test, pred_test, metric="recall")
+        recall_test = recall_test_metrics["Recall (Macro)"]
+        precision_valid_metrics = calculate_metrics(Y_valid, pred_valid, metric="precision")
+        precision_valid = precision_valid_metrics["Precision (Macro)"]
+        precision_test_metrics = calculate_metrics(Y_test, pred_test, metric="precision")
+        precision_test = precision_test_metrics["Precision (Macro)"]
+
+    return {
+        "fold_idx": fold_idx,
+        "sf": selected_mask,
+        "nf": nf,
+        "curve": curve,
+        "time": elapsed,
+        "acc_valid": acc_valid,
+        "acc_test": acc_test,
+        "f1_valid": f1_valid,
+        "f1_test": f1_test,
+        "auc_valid": auc_valid,
+        "auc_test": auc_test,
+        "recall_valid": recall_valid,
+        "recall_test": recall_test,
+        "precision_valid": precision_valid,
+        "precision_test": precision_test,
+    }
 
 
 def run_cross_validation(
@@ -153,7 +277,9 @@ def run_cross_validation(
 
         method_has_runs = False
         for run_idx, fold_indices in enumerate(fold_splits_by_run):
+            print(f"run_idx: {run_idx}")
             method_has_runs = True
+            n_jobs = opts.get("n_jobs", 1)
             fold_sf = np.zeros((folds, dim))
             fold_nf = np.zeros((folds, 1))
             fold_curve = np.zeros((folds, opts["T"]))
@@ -169,98 +295,37 @@ def run_cross_validation(
             fold_precision_valid = np.zeros((folds, 1))
             fold_precision_test = np.zeros((folds, 1))
 
-            for fold_idx, (train_index, test_index) in enumerate(fold_indices):
-                X_train = X[train_index]
-                Y_train = Y[train_index]
-                X_valid = X[test_index]
-                Y_valid = Y[test_index]
-                X_test = X_valid.copy()
-                Y_test = Y_valid.copy()
-                opts["random_seed"] = base_seed + run_idx * 1000 + fold_idx
+            fold_results = Parallel(n_jobs=n_jobs)(
+                delayed(_run_single_fold)(
+                    fs_method,
+                    fold_idx,
+                    train_index,
+                    test_index,
+                    X,
+                    Y,
+                    opts,
+                    base_seed,
+                    run_idx,
+                )
+                for fold_idx, (train_index, test_index) in enumerate(fold_indices)
+            )
 
-                start_time = time.time()
-                FS = fs_method(X_train.copy(), X_valid.copy(), Y_train.copy(), Y_valid.copy(), opts)
-                end_time = time.time()
-
-                fold_sf[fold_idx, :] = FS["sf"]
-                selected_mask = fold_sf[fold_idx, :]
-                fold_nf[fold_idx, 0] = FS["nf"]
-                fold_curve[fold_idx, :] = FS["c"]
-                fold_timecal[fold_idx, 0] = end_time - start_time
-
-                if opts["classify"] == "kmeans":
-                    pred_valid = classifier_method(
-                        X_train[:, selected_mask == 1],
-                        X_valid[:, selected_mask == 1],
-                        Y_train,
-                        Y_valid,
-                        opts,
-                    )
-                    pred_test = classifier_method(
-                        X_train[:, selected_mask == 1],
-                        X_test[:, selected_mask == 1],
-                        Y_train,
-                        Y_valid,
-                        opts,
-                    )
-                    y_all = np.concatenate((Y_train, Y_valid))
-                    pred_test_map = map_labels_hungarian(y_all, pred_test)
-                    pred_test = np.array([pred_test_map[label] for label in pred_test])
-                    pred_valid_map = map_labels_hungarian(y_all, pred_valid)
-                    pred_valid = np.array([pred_valid_map[label] for label in pred_valid])
-
-                    fold_acc_valid[fold_idx, 0] = calculate_metrics(y_all, pred_valid, metric="accuracy")
-                    fold_acc_test[fold_idx, 0] = calculate_metrics(y_all, pred_test, metric="accuracy")
-                    f1_valid_metrics = calculate_metrics(y_all, pred_valid, metric="f1")
-                    fold_f1_valid[fold_idx, 0] = f1_valid_metrics["F1Score (Macro)"]
-                    f1_test_metrics = calculate_metrics(y_all, pred_test, metric="f1")
-                    fold_f1_test[fold_idx, 0] = f1_test_metrics["F1Score (Macro)"]
-                    auc_valid_metrics = calculate_metrics(y_all, pred_valid, metric="roc_auc")
-                    fold_auc_valid[fold_idx, 0] = auc_valid_metrics["ROC AUC (Macro)"]
-                    auc_test_metrics = calculate_metrics(y_all, pred_test, metric="roc_auc")
-                    fold_auc_test[fold_idx, 0] = auc_test_metrics["ROC AUC (Macro)"]
-                    recall_valid_metrics = calculate_metrics(y_all, pred_valid, metric="recall")
-                    fold_recall_valid[fold_idx, 0] = recall_valid_metrics["Recall (Macro)"]
-                    recall_test_metrics = calculate_metrics(y_all, pred_test, metric="recall")
-                    fold_recall_test[fold_idx, 0] = recall_test_metrics["Recall (Macro)"]
-                    precision_valid_metrics = calculate_metrics(y_all, pred_valid, metric="precision")
-                    fold_precision_valid[fold_idx, 0] = precision_valid_metrics["Precision (Macro)"]
-                    precision_test_metrics = calculate_metrics(y_all, pred_test, metric="precision")
-                    fold_precision_test[fold_idx, 0] = precision_test_metrics["Precision (Macro)"]
-                else:
-                    pred_valid = classifier_method(
-                        X_train[:, selected_mask == 1],
-                        X_valid[:, selected_mask == 1],
-                        Y_train,
-                        Y_valid,
-                        opts,
-                    )
-                    pred_test = classifier_method(
-                        X_train[:, selected_mask == 1],
-                        X_test[:, selected_mask == 1],
-                        Y_train,
-                        Y_valid,
-                        opts,
-                    )
-
-                    fold_acc_valid[fold_idx, 0] = calculate_metrics(Y_valid, pred_valid, metric="accuracy")
-                    fold_acc_test[fold_idx, 0] = calculate_metrics(Y_test, pred_test, metric="accuracy")
-                    f1_valid_metrics = calculate_metrics(Y_valid, pred_valid, metric="f1")
-                    fold_f1_valid[fold_idx, 0] = f1_valid_metrics["F1Score (Macro)"]
-                    f1_test_metrics = calculate_metrics(Y_test, pred_test, metric="f1")
-                    fold_f1_test[fold_idx, 0] = f1_test_metrics["F1Score (Macro)"]
-                    auc_valid_metrics = calculate_metrics(Y_valid, pred_valid, metric="roc_auc")
-                    fold_auc_valid[fold_idx, 0] = auc_valid_metrics["ROC AUC (Macro)"]
-                    auc_test_metrics = calculate_metrics(Y_test, pred_test, metric="roc_auc")
-                    fold_auc_test[fold_idx, 0] = auc_test_metrics["ROC AUC (Macro)"]
-                    recall_valid_metrics = calculate_metrics(Y_valid, pred_valid, metric="recall")
-                    fold_recall_valid[fold_idx, 0] = recall_valid_metrics["Recall (Macro)"]
-                    recall_test_metrics = calculate_metrics(Y_test, pred_test, metric="recall")
-                    fold_recall_test[fold_idx, 0] = recall_test_metrics["Recall (Macro)"]
-                    precision_valid_metrics = calculate_metrics(Y_valid, pred_valid, metric="precision")
-                    fold_precision_valid[fold_idx, 0] = precision_valid_metrics["Precision (Macro)"]
-                    precision_test_metrics = calculate_metrics(Y_test, pred_test, metric="precision")
-                    fold_precision_test[fold_idx, 0] = precision_test_metrics["Precision (Macro)"]
+            for res in fold_results:
+                fi = res["fold_idx"]
+                fold_sf[fi, :] = res["sf"]
+                fold_nf[fi, 0] = res["nf"]
+                fold_curve[fi, :] = res["curve"]
+                fold_timecal[fi, 0] = res["time"]
+                fold_acc_valid[fi, 0] = res["acc_valid"]
+                fold_acc_test[fi, 0] = res["acc_test"]
+                fold_f1_valid[fi, 0] = res["f1_valid"]
+                fold_f1_test[fi, 0] = res["f1_test"]
+                fold_auc_valid[fi, 0] = res["auc_valid"]
+                fold_auc_test[fi, 0] = res["auc_test"]
+                fold_recall_valid[fi, 0] = res["recall_valid"]
+                fold_recall_test[fi, 0] = res["recall_test"]
+                fold_precision_valid[fi, 0] = res["precision_valid"]
+                fold_precision_test[fi, 0] = res["precision_test"]
 
             # 聚合本次重复的k折结果（均值）并保存
             best_fold_idx = int(np.argmin(fold_curve[:, -1]))
@@ -633,6 +698,7 @@ def main():
         "split": split,
         "func": func,
         "knn_para": 3,
+        "n_jobs": 8
     }
     # current_date = datetime.datetime.now().strftime("%m-%d")
     current_date = "11"
