@@ -73,7 +73,6 @@ def _run_single_fold(
     base_seed,
     run_idx,
 ):
-    print(f"\tfold_idx: {fold_idx}")
     X_train = X[train_index]
     Y_train = Y[train_index]
     X_valid = X[test_index]
@@ -91,7 +90,7 @@ def _run_single_fold(
     curve = np.asarray(FS["c"]).reshape(-1)
     nf = FS["nf"]
     elapsed = end_time - start_time
-
+    print(f"run: {run_idx}, fold: {fold_idx}, \n\telapsed: {round(elapsed, 2)}")
     if local_opts["classify"] == "kmeans":
         pred_valid = classifier_method(
             X_train[:, selected_mask == 1],
@@ -182,6 +181,123 @@ def _run_single_fold(
         "recall_test": recall_test,
         "precision_valid": precision_valid,
         "precision_test": precision_test,
+    }
+
+
+def _run_single_run(
+    run_idx,
+    fold_indices,
+    fs_method,
+    X,
+    Y,
+    opts,
+    base_seed,
+    dim,
+    folds,
+    n_jobs_folds,
+    method,
+    data_name,
+):
+    fold_sf = np.zeros((folds, dim))
+    fold_nf = np.zeros((folds, 1))
+    fold_curve = np.zeros((folds, opts["T"]))
+    fold_timecal = np.zeros((folds, 1))
+    fold_acc_valid = np.zeros((folds, 1))
+    fold_acc_test = np.zeros((folds, 1))
+    fold_f1_valid = np.zeros((folds, 1))
+    fold_f1_test = np.zeros((folds, 1))
+    fold_auc_valid = np.zeros((folds, 1))
+    fold_auc_test = np.zeros((folds, 1))
+    fold_recall_valid = np.zeros((folds, 1))
+    fold_recall_test = np.zeros((folds, 1))
+    fold_precision_valid = np.zeros((folds, 1))
+    fold_precision_test = np.zeros((folds, 1))
+
+    fold_results = Parallel(n_jobs=n_jobs_folds)(
+        delayed(_run_single_fold)(
+            fs_method,
+            fold_idx,
+            train_index,
+            test_index,
+            X,
+            Y,
+            opts,
+            base_seed,
+            run_idx,
+        )
+        for fold_idx, (train_index, test_index) in enumerate(fold_indices)
+    )
+
+    for res in fold_results:
+        fi = res["fold_idx"]
+        fold_sf[fi, :] = res["sf"]
+        fold_nf[fi, 0] = res["nf"]
+        fold_curve[fi, :] = res["curve"]
+        fold_timecal[fi, 0] = res["time"]
+        fold_acc_valid[fi, 0] = res["acc_valid"]
+        fold_acc_test[fi, 0] = res["acc_test"]
+        fold_f1_valid[fi, 0] = res["f1_valid"]
+        fold_f1_test[fi, 0] = res["f1_test"]
+        fold_auc_valid[fi, 0] = res["auc_valid"]
+        fold_auc_test[fi, 0] = res["auc_test"]
+        fold_recall_valid[fi, 0] = res["recall_valid"]
+        fold_recall_test[fi, 0] = res["recall_test"]
+        fold_precision_valid[fi, 0] = res["precision_valid"]
+        fold_precision_test[fi, 0] = res["precision_test"]
+
+    best_fold_idx = int(np.argmin(fold_curve[:, -1]))
+    run_sf = fold_sf[best_fold_idx, :]
+    nf_mean = np.mean(fold_nf)
+    curve_mean = np.mean(fold_curve, axis=0)
+    time_mean = np.mean(fold_timecal)
+    acc_valid_mean = np.mean(fold_acc_valid)
+    acc_test_mean = np.mean(fold_acc_test)
+    f1_valid_mean = np.mean(fold_f1_valid)
+    f1_test_mean = np.mean(fold_f1_test)
+    auc_valid_mean = np.mean(fold_auc_valid)
+    auc_test_mean = np.mean(fold_auc_test)
+    recall_valid_mean = np.mean(fold_recall_valid)
+    recall_test_mean = np.mean(fold_recall_test)
+    precision_valid_mean = np.mean(fold_precision_valid)
+    precision_test_mean = np.mean(fold_precision_test)
+
+    run_result = {
+        "Data Name": data_name,
+        "Folds": folds,
+        "Method": method,
+        "Run": run_idx + 1,
+        "Feature Number": nf_mean,
+        "Time Calculation": time_mean,
+        "Accuracy Valid": acc_valid_mean,
+        "Accuracy Test": acc_test_mean,
+        "F1 Valid": f1_valid_mean,
+        "F1 Test": f1_test_mean,
+        "AUC Valid": auc_valid_mean,
+        "AUC Test": auc_test_mean,
+        "Recall Valid": recall_valid_mean,
+        "Recall Test": recall_test_mean,
+        "Precision Valid": precision_valid_mean,
+        "Precision Test": precision_test_mean,
+    }
+
+    return {
+        "run_idx": run_idx,
+        "sf": run_sf,
+        "nf": nf_mean,
+        "curve": curve_mean,
+        "time": time_mean,
+        "acc_valid": acc_valid_mean,
+        "acc_test": acc_test_mean,
+        "f1_valid": f1_valid_mean,
+        "f1_test": f1_test_mean,
+        "auc_valid": auc_valid_mean,
+        "auc_test": auc_test_mean,
+        "recall_valid": recall_valid_mean,
+        "recall_test": recall_test_mean,
+        "precision_valid": precision_valid_mean,
+        "precision_test": precision_test_mean,
+        "best_fold_idx": best_fold_idx,
+        "run_result": run_result,
     }
 
 
@@ -276,94 +392,71 @@ def run_cross_validation(
             continue
 
         method_has_runs = False
-        for run_idx, fold_indices in enumerate(fold_splits_by_run):
-            print(f"run_idx: {run_idx}")
-            method_has_runs = True
-            n_jobs = opts.get("n_jobs", 1)
-            fold_sf = np.zeros((folds, dim))
-            fold_nf = np.zeros((folds, 1))
-            fold_curve = np.zeros((folds, opts["T"]))
-            fold_timecal = np.zeros((folds, 1))
-            fold_acc_valid = np.zeros((folds, 1))
-            fold_acc_test = np.zeros((folds, 1))
-            fold_f1_valid = np.zeros((folds, 1))
-            fold_f1_test = np.zeros((folds, 1))
-            fold_auc_valid = np.zeros((folds, 1))
-            fold_auc_test = np.zeros((folds, 1))
-            fold_recall_valid = np.zeros((folds, 1))
-            fold_recall_test = np.zeros((folds, 1))
-            fold_precision_valid = np.zeros((folds, 1))
-            fold_precision_test = np.zeros((folds, 1))
+        n_jobs_runs = opts.get("n_jobs_runs", 1)
+        n_jobs_folds = opts.get("n_jobs_folds", opts.get("n_jobs", 1))
+        if n_jobs_runs > 1 and "n_jobs_folds" not in opts and "n_jobs" not in opts:
+            n_jobs_folds = 1  # avoid oversubscribing CPUs when nesting parallel loops
 
-            fold_results = Parallel(n_jobs=n_jobs)(
-                delayed(_run_single_fold)(
+        run_tasks = list(enumerate(fold_splits_by_run))
+        if n_jobs_runs == 1:
+            run_outputs = []
+            for run_idx, fold_indices in run_tasks:
+                method_has_runs = True
+                run_outputs.append(
+                    _run_single_run(
+                        run_idx,
+                        fold_indices,
+                        fs_method,
+                        X,
+                        Y,
+                        opts,
+                        base_seed,
+                        dim,
+                        folds,
+                        n_jobs_folds,
+                        method,
+                        data_name,
+                    )
+                )
+        else:
+            method_has_runs = bool(run_tasks)
+
+            run_outputs = Parallel(n_jobs=n_jobs_runs)(
+                delayed(_run_single_run)(
+                    run_idx,
+                    fold_indices,
                     fs_method,
-                    fold_idx,
-                    train_index,
-                    test_index,
                     X,
                     Y,
                     opts,
                     base_seed,
-                    run_idx,
+                    dim,
+                    folds,
+                    n_jobs_folds,
+                    method,
+                    data_name,
                 )
-                for fold_idx, (train_index, test_index) in enumerate(fold_indices)
+                for run_idx, fold_indices in run_tasks
             )
 
-            for res in fold_results:
-                fi = res["fold_idx"]
-                fold_sf[fi, :] = res["sf"]
-                fold_nf[fi, 0] = res["nf"]
-                fold_curve[fi, :] = res["curve"]
-                fold_timecal[fi, 0] = res["time"]
-                fold_acc_valid[fi, 0] = res["acc_valid"]
-                fold_acc_test[fi, 0] = res["acc_test"]
-                fold_f1_valid[fi, 0] = res["f1_valid"]
-                fold_f1_test[fi, 0] = res["f1_test"]
-                fold_auc_valid[fi, 0] = res["auc_valid"]
-                fold_auc_test[fi, 0] = res["auc_test"]
-                fold_recall_valid[fi, 0] = res["recall_valid"]
-                fold_recall_test[fi, 0] = res["recall_test"]
-                fold_precision_valid[fi, 0] = res["precision_valid"]
-                fold_precision_test[fi, 0] = res["precision_test"]
-
-            # 聚合本次重复的k折结果（均值）并保存
-            best_fold_idx = int(np.argmin(fold_curve[:, -1]))
-            best_fold_per_run.append(best_fold_idx)
-            sf[run_idx, :] = fold_sf[best_fold_idx, :]
-            nf[run_idx, 0] = np.mean(fold_nf)
-            curve[run_idx, :] = np.mean(fold_curve, axis=0)
-            timecal[run_idx, 0] = np.mean(fold_timecal)
-            acc_valid[run_idx, 0] = np.mean(fold_acc_valid)
-            acc_test[run_idx, 0] = np.mean(fold_acc_test)
-            f1_valid[run_idx, 0] = np.mean(fold_f1_valid)
-            f1_test[run_idx, 0] = np.mean(fold_f1_test)
-            auc_valid[run_idx, 0] = np.mean(fold_auc_valid)
-            auc_test[run_idx, 0] = np.mean(fold_auc_test)
-            recall_valid[run_idx, 0] = np.mean(fold_recall_valid)
-            recall_test[run_idx, 0] = np.mean(fold_recall_test)
-            precision_valid[run_idx, 0] = np.mean(fold_precision_valid)
-            precision_test[run_idx, 0] = np.mean(fold_precision_test)
-
-            run_result = {
-                "Data Name": data_name,
-                "Folds": folds,
-                "Method": method,
-                "Run": run_idx + 1,
-                "Feature Number": nf[run_idx, 0],
-                "Time Calculation": timecal[run_idx, 0],
-                "Accuracy Valid": acc_valid[run_idx, 0],
-                "Accuracy Test": acc_test[run_idx, 0],
-                "F1 Valid": f1_valid[run_idx, 0],
-                "F1 Test": f1_test[run_idx, 0],
-                "AUC Valid": auc_valid[run_idx, 0],
-                "AUC Test": auc_test[run_idx, 0],
-                "Recall Valid": recall_valid[run_idx, 0],
-                "Recall Test": recall_test[run_idx, 0],
-                "Precision Valid": precision_valid[run_idx, 0],
-                "Precision Test": precision_test[run_idx, 0],
-            }
-            result_run.append(run_result)
+        for res in run_outputs:
+            ri = res["run_idx"]
+            best_fold_per_run.append(res["best_fold_idx"])
+            sf[ri, :] = res["sf"]
+            nf[ri, 0] = res["nf"]
+            curve[ri, :] = res["curve"]
+            timecal[ri, 0] = res["time"]
+            acc_valid[ri, 0] = res["acc_valid"]
+            acc_test[ri, 0] = res["acc_test"]
+            f1_valid[ri, 0] = res["f1_valid"]
+            f1_test[ri, 0] = res["f1_test"]
+            auc_valid[ri, 0] = res["auc_valid"]
+            auc_test[ri, 0] = res["auc_test"]
+            recall_valid[ri, 0] = res["recall_valid"]
+            recall_test[ri, 0] = res["recall_test"]
+            precision_valid[ri, 0] = res["precision_valid"]
+            precision_test[ri, 0] = res["precision_test"]
+            result_run.append(res["run_result"])
 
         if not method_has_runs:
             continue
@@ -698,7 +791,8 @@ def main():
         "split": split,
         "func": func,
         "knn_para": 3,
-        "n_jobs": 8
+        "n_jobs_runs": -1,
+        "n_jobs_folds": 1 # 每个 run 内折串行，避免双重并行占满
     }
     # current_date = datetime.datetime.now().strftime("%m-%d")
     current_date = "11"
