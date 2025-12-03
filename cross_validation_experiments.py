@@ -4,6 +4,13 @@ import time
 import datetime
 import importlib
 import warnings
+import random
+
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["NUMEXPR_NUM_THREADS"] = "1"
+
 
 import numpy as np
 import pandas as pd
@@ -90,7 +97,8 @@ def _run_single_fold(
     curve = np.asarray(FS["c"]).reshape(-1)
     nf = FS["nf"]
     elapsed = end_time - start_time
-    print(f"run: {run_idx}, fold: {fold_idx}, \n\telapsed: {round(elapsed, 2)}")
+    if random.random() < 0.2:
+        print(f"run: {run_idx}, fold: {fold_idx}, elapsed: {round(elapsed, 2)}")
     if local_opts["classify"] == "kmeans":
         pred_valid = classifier_method(
             X_train[:, selected_mask == 1],
@@ -755,27 +763,27 @@ def main():
 
     dataset = [
         "Colon",
+        "ALL_AML_4",
+        "BreastGCE",
+        "CML treatment",
         "BT1",
-        # "Leukemia2",
-        # "T9",
-        # "BreastGCE",
-        # "T11",
-        # "CNS",
-        # "LKM1",
-        # "Prostate",
-        # "LKM2",
-        # "CML treatment",
-        # "ALL_AML_4",
+        "Leukemia2",
+        "T9",
+        "T11",
+        "CNS",
+        "LKM1",
+        "Prostate",
+        "LKM2",
     ]
     dataset = [filename.rstrip(".csv") for filename in dataset]
     # methodset = ['QLDGS-PSO-Elite', "QLDGS-PSO", 'FTMGWO', 'FESSA', 'SFE', 'PSO', 'BBPSO', 'VLPSO', 'SFEPSO']
     # methodset = ['rlpsoasm', 'QLDGS-PSO', 'QLDGS-PSO-Elite']
     # methodset = ["tmgwo", "essa", "SFE", "PSO", "BBPSO", "VLPSO", "SFEPSO", "QLDGS-PSO", "QLDGS-PSO-Elite", 'rlpsoasm', 'lapsodr', "igpso"]
-    methodset = [ "PSO", "QLDGS-PSO",]
+    methodset = [ "PSO", "tmgwo", "essa", "SFE", "BBPSO", "VLPSO", "SFEPSO", "QLDGS-PSO", "rlpsoasm", "lapsodr", "igpso"]
     # methodset = ['lapsodr', "igpso"]
     # methodset = ["PSO", "BBPSO", "rlpsoasm"]
     desired_folds = 5
-    runs = 2
+    runs = 20
     N = 20
     Maxiter = 500
     classify = "knn"
@@ -791,9 +799,11 @@ def main():
         "split": split,
         "func": func,
         "knn_para": 3,
-        "n_jobs_runs": -1,
+        "n_jobs_runs": 26,
         "n_jobs_folds": 1 # 每个 run 内折串行，避免双重并行占满
     }
+    print("n_jobs_runs", opts["n_jobs_runs"])
+    print("n_jobs_folds", opts["n_jobs_folds"])
     # current_date = datetime.datetime.now().strftime("%m-%d")
     current_date = "11"
     output_dir = "Result"
