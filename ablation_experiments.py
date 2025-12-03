@@ -2,6 +2,8 @@ import argparse
 import importlib.util
 from pathlib import Path
 import time
+import os
+from concurrent.futures import ProcessPoolExecutor
 
 import numpy as np
 import pandas as pd
@@ -74,77 +76,90 @@ def split_main_exvute(X, Y, run, test_size):
     return X_train, X_valid, Y_train, Y_valid, X_test, Y_test
 
 
-def evaluate_configuration(qldgs, X, Y, opts, runs, test_size):
+def evaluate_single_run(qldgs, X, Y, opts, run, test_size):
     dim = X.shape[1]
-    results = []
-    for run in range(runs):
-        X_train, X_valid, Y_train, Y_valid, X_test, Y_test = split_main_exvute(
-            X, Y, run, test_size
+    X_train, X_valid, Y_train, Y_valid, X_test, Y_test = split_main_exvute(
+        X, Y, run, test_size
+    )
+    local_opts = opts.copy()
+    local_opts["random_seed"] = run
+    start = time.time()
+    FS = qldgs.fs(X_train.copy(), X_valid.copy(), Y_train.copy(), Y_valid.copy(), local_opts)
+    elapsed = time.time() - start
+    selected = FS["sf"] == 1
+    if not np.any(selected):
+        selected = np.ones(dim, dtype=bool)
+    run_metrics = {"nf": FS["nf"], "time": elapsed}
+    if local_opts.get("classify") == "kmeans":
+        pred_valid = classifier_method(
+            X_train[:, selected], X_valid[:, selected], Y_train, Y_valid, local_opts
         )
-        local_opts = opts.copy()
-        local_opts["random_seed"] = run
-        start = time.time()
-        FS = qldgs.fs(
-            X_train.copy(), X_valid.copy(), Y_train.copy(), Y_valid.copy(), local_opts
+        pred_test = classifier_method(
+            X_train[:, selected], X_test[:, selected], Y_train, Y_valid, local_opts
         )
-        elapsed = time.time() - start
-        selected = FS["sf"] == 1
-        if not np.any(selected):
-            selected = np.ones(dim, dtype=bool)
-        run_metrics = {"nf": FS["nf"], "time": elapsed}
-        if local_opts.get("classify") == "kmeans":
-            pred_valid = classifier_method(
-                X_train[:, selected], X_valid[:, selected], Y_train, Y_valid, local_opts
-            )
-            pred_test = classifier_method(
-                X_train[:, selected], X_test[:, selected], Y_train, Y_valid, local_opts
-            )
-            y_all = np.concatenate((Y_train, Y_valid))
-            pred_valid_map = map_labels_hungarian(y_all, pred_valid)
-            pred_valid = np.array([pred_valid_map[label] for label in pred_valid])
-            pred_test_map = map_labels_hungarian(y_all, pred_test)
-            pred_test = np.array([pred_test_map[label] for label in pred_test])
-            target_valid = y_all
-            target_test = y_all
-        else:
-            pred_valid = classifier_method(
-                X_train[:, selected], X_valid[:, selected], Y_train, Y_valid, local_opts
-            )
-            pred_test = classifier_method(
-                X_train[:, selected], X_test[:, selected], Y_train, Y_valid, local_opts
-            )
-            target_valid = Y_valid
-            target_test = Y_test
+        y_all = np.concatenate((Y_train, Y_valid))
+        pred_valid_map = map_labels_hungarian(y_all, pred_valid)
+        pred_valid = np.array([pred_valid_map[label] for label in pred_valid])
+        pred_test_map = map_labels_hungarian(y_all, pred_test)
+        pred_test = np.array([pred_test_map[label] for label in pred_test])
+        target_valid = y_all
+        target_test = y_all
+    else:
+        pred_valid = classifier_method(
+            X_train[:, selected], X_valid[:, selected], Y_train, Y_valid, local_opts
+        )
+        pred_test = classifier_method(
+            X_train[:, selected], X_test[:, selected], Y_train, Y_valid, local_opts
+        )
+        target_valid = Y_valid
+        target_test = Y_test
 
-        acc_valid = calculate_metrics(target_valid, pred_valid, metric="accuracy")
-        acc_test = calculate_metrics(target_test, pred_test, metric="accuracy")
-        f1_valid_metrics = calculate_metrics(target_valid, pred_valid, metric="f1")
-        f1_test_metrics = calculate_metrics(target_test, pred_test, metric="f1")
-        auc_valid_metrics = calculate_metrics(target_valid, pred_valid, metric="roc_auc")
-        auc_test_metrics = calculate_metrics(target_test, pred_test, metric="roc_auc")
-        recall_valid_metrics = calculate_metrics(target_valid, pred_valid, metric="recall")
-        recall_test_metrics = calculate_metrics(target_test, pred_test, metric="recall")
-        precision_valid_metrics = calculate_metrics(
-            target_valid, pred_valid, metric="precision"
-        )
-        precision_test_metrics = calculate_metrics(
-            target_test, pred_test, metric="precision"
-        )
-        run_metrics.update(
-            {
-                "acc_valid": acc_valid,
-                "acc_test": acc_test,
-                "f1_valid": f1_valid_metrics["F1Score (Macro)"],
-                "f1_test": f1_test_metrics["F1Score (Macro)"],
-                "auc_valid": auc_valid_metrics["ROC AUC (Macro)"],
-                "auc_test": auc_test_metrics["ROC AUC (Macro)"],
-                "recall_valid": recall_valid_metrics["Recall (Macro)"],
-                "recall_test": recall_test_metrics["Recall (Macro)"],
-                "precision_valid": precision_valid_metrics["Precision (Macro)"],
-                "precision_test": precision_test_metrics["Precision (Macro)"],
-            }
-        )
-        results.append(run_metrics)
+    acc_valid = calculate_metrics(target_valid, pred_valid, metric="accuracy")
+    acc_test = calculate_metrics(target_test, pred_test, metric="accuracy")
+    f1_valid_metrics = calculate_metrics(target_valid, pred_valid, metric="f1")
+    f1_test_metrics = calculate_metrics(target_test, pred_test, metric="f1")
+    auc_valid_metrics = calculate_metrics(target_valid, pred_valid, metric="roc_auc")
+    auc_test_metrics = calculate_metrics(target_test, pred_test, metric="roc_auc")
+    recall_valid_metrics = calculate_metrics(target_valid, pred_valid, metric="recall")
+    recall_test_metrics = calculate_metrics(target_test, pred_test, metric="recall")
+    precision_valid_metrics = calculate_metrics(target_valid, pred_valid, metric="precision")
+    precision_test_metrics = calculate_metrics(target_test, pred_test, metric="precision")
+    run_metrics.update(
+        {
+            "acc_valid": acc_valid,
+            "acc_test": acc_test,
+            "f1_valid": f1_valid_metrics["F1Score (Macro)"],
+            "f1_test": f1_test_metrics["F1Score (Macro)"],
+            "auc_valid": auc_valid_metrics["ROC AUC (Macro)"],
+            "auc_test": auc_test_metrics["ROC AUC (Macro)"],
+            "recall_valid": recall_valid_metrics["Recall (Macro)"],
+            "recall_test": recall_test_metrics["Recall (Macro)"],
+            "precision_valid": precision_valid_metrics["Precision (Macro)"],
+            "precision_test": precision_test_metrics["Precision (Macro)"],
+        }
+    )
+    return run_metrics
+
+
+def _evaluate_single_run_subprocess(args):
+    run, X, Y, opts, test_size = args
+    qldgs = load_qldgs_module()
+    return run, evaluate_single_run(qldgs, X, Y, opts, run, test_size)
+
+
+def evaluate_configuration(qldgs, X, Y, opts, runs, test_size, workers):
+    worker_count = workers or (os.cpu_count() or 1)
+    worker_count = max(1, min(worker_count, runs))
+    if worker_count == 1:
+        return [
+            evaluate_single_run(qldgs, X, Y, opts, run, test_size) for run in range(runs)
+        ]
+
+    args_iter = ((run, X, Y, opts, test_size) for run in range(runs))
+    results = [None] * runs
+    with ProcessPoolExecutor(max_workers=worker_count) as executor:
+        for run_idx, metrics in executor.map(_evaluate_single_run_subprocess, args_iter):
+            results[run_idx] = metrics
     return results
 
 
@@ -188,6 +203,7 @@ def run(args):
                 local_opts,
                 args.runs,
                 args.test_size,
+                args.workers,
             )
             for run_idx, metrics in enumerate(mode_results):
                 record = {
@@ -253,6 +269,12 @@ def main():
     parser = argparse.ArgumentParser(description="QLDGS-PSO-Elite ablation runner")
     parser.add_argument("--datasets", nargs="*", help="Dataset names without .csv extension")
     parser.add_argument("--runs", type=int, default=5, help="Independent runs per mode")
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=0,
+        help="Worker processes for parallel runs (0 uses available CPU cores)",
+    )
     parser.add_argument("--population", type=int, default=20, help="Population size N")
     parser.add_argument("--iterations", type=int, default=500, help="Iterations per run T")
     parser.add_argument("--interval-num", type=int, default=20, help="Number of intervals L")
@@ -291,6 +313,14 @@ def main():
         help="CSV file for ablation logs",
     )
     args = parser.parse_args()
+    
+    if args.workers > 0:
+        print("workers:", args.workers)
+        # os.environ["OMP_NUM_THREADS"] = "1"
+        # os.environ["MKL_NUM_THREADS"] = "1"
+        # os.environ["OPENBLAS_NUM_THREADS"] = "1"
+        # os.environ["NUMEXPR_NUM_THREADS"] = "1"
+    
     run(args)
 
 

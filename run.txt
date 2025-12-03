@@ -18,18 +18,19 @@ python parameter_sensitivity.py \
 
 python ablation_experiments.py \
   --datasets Leukemia2 Colon T9 BT1 BreastGCE T11 CNS LKM1 Prostate LKM2 "CML treatment" ALL_AML_4 \
-  --runs 5 \
+  --runs 20 \
   --population 20 \
   --iterations 500 \
   --interval-num 20 \
   --interval-iterations 20 \
-  --ql-lr 0.2 \
+  --ql-lr 0.1 \
   --ql-gamma 0.5 \
-  --phi 0.99 \
+  --phi 0.1 \
   --classifier knn \
   --knn-k 3 \
   --split 0 \
   --func 0 \
+  --workers 20 \
   --test-size 0.3 \
   --modes baseline_pso pso_dim pso_dim_random full_qldgs \
   --output Result/ablation_experiments.csv
