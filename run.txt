@@ -30,7 +30,7 @@ python ablation_experiments.py \
   --knn-k 3 \
   --split 0 \
   --func 0 \
-  --workers 20 \
+  --workers 26 \
   --test-size 0.3 \
-  --modes baseline_pso pso_dim pso_dim_random full_qldgs \
+  --modes full_qldgs baseline_pso pso_dim pso_dim_random  \
   --output Result/ablation_experiments.csv

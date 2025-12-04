@@ -3,13 +3,13 @@ import importlib.util
 from pathlib import Path
 import time
 import os
-from concurrent.futures import ProcessPoolExecutor
 
 import numpy as np
 import pandas as pd
 from scipy.optimize import linear_sum_assignment
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import MinMaxScaler
+from joblib import Parallel, delayed
 
 from CCM import calculate_metrics
 from Function import classifier_method
@@ -40,7 +40,7 @@ def map_labels_hungarian(true_labels, cluster_labels):
 
 
 def load_qldgs_module():
-    module_path = Path(__file__).resolve().parent / "Method-combination" / "QLDGS-PSO-Elite.py"
+    module_path = Path(__file__).resolve().parent / "Method-combination" / "QLDGS-PSO-ablation.py"
     spec = importlib.util.spec_from_file_location("qldgs_pso_elite", module_path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -82,7 +82,7 @@ def evaluate_single_run(qldgs, X, Y, opts, run, test_size):
         X, Y, run, test_size
     )
     local_opts = opts.copy()
-    local_opts["random_seed"] = run
+    local_opts["random_seed"] = int(time.time())
     start = time.time()
     FS = qldgs.fs(X_train.copy(), X_valid.copy(), Y_train.copy(), Y_valid.copy(), local_opts)
     elapsed = time.time() - start
@@ -155,11 +155,13 @@ def evaluate_configuration(qldgs, X, Y, opts, runs, test_size, workers):
             evaluate_single_run(qldgs, X, Y, opts, run, test_size) for run in range(runs)
         ]
 
-    args_iter = ((run, X, Y, opts, test_size) for run in range(runs))
     results = [None] * runs
-    with ProcessPoolExecutor(max_workers=worker_count) as executor:
-        for run_idx, metrics in executor.map(_evaluate_single_run_subprocess, args_iter):
-            results[run_idx] = metrics
+    parallel_outputs = Parallel(n_jobs=worker_count, prefer="processes")(
+        delayed(_evaluate_single_run_subprocess)((run, X, Y, opts, test_size))
+        for run in range(runs)
+    )
+    for run_idx, metrics in parallel_outputs:
+        results[run_idx] = metrics
     return results
 
 
