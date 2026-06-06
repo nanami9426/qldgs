@@ -778,9 +778,9 @@ def main():
     dataset = [filename.rstrip(".csv") for filename in dataset]
     # methodset = ['QLDGS-PSO-Elite', "QLDGS-PSO", 'FTMGWO', 'FESSA', 'SFE', 'PSO', 'BBPSO', 'VLPSO', 'SFEPSO']
     # methodset = ['rlpsoasm', 'QLDGS-PSO', 'QLDGS-PSO-Elite']
-    # methodset = ["tmgwo", "essa", "SFE", "PSO", "BBPSO", "VLPSO", "SFEPSO", "QLDGS-PSO", "QLDGS-PSO-Elite", 'rlpsoasm', 'lapsodr', "igpso"]
-    methodset = [ "PSO", "tmgwo", "essa", "SFE", "BBPSO", "VLPSO", "SFEPSO", "QLDGS-PSO", "rlpsoasm", "lapsodr", "igpso"]
-    # methodset = ['lapsodr', "igpso"]
+    # methodset = ["tmgwo", "essa", "SFE", "PSO", "BBPSO", "VLPSO", "SFEPSO", "QLDGS-PSO", "QLDGS-PSO-Elite", 'rlpsoasm', 'lapsodr', "igpso", "eqlfs"]
+    methodset = [ "PSO", "tmgwo", "essa", "SFE", "BBPSO", "VLPSO", "SFEPSO", "QLDGS-PSO", "rlpsoasm", "lapsodr", "igpso", "eqlfs"]
+    # methodset = ['lapsodr', "igpso", "eqlfs"]
     # methodset = ["PSO", "BBPSO", "rlpsoasm"]
     desired_folds = 5
     runs = 20

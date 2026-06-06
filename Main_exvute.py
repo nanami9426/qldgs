@@ -326,10 +326,10 @@ def main():
 
     # 运行的数据集
     dataset = sorted_file_names
-    # dataset = ['Leukemia2', 'Colon', 'T9', 'BT1', 'BreastGCE', 'T11', 'CNS', 'LKM1', 'Prostate', 'LKM2',
-    #            'CML treatment',
-    #            'ALL_AML_4']
-    dataset = ['Colon', 'BT1']
+    dataset = ['Leukemia2', 'Colon', 'T9', 'BT1', 'BreastGCE', 'T11', 'CNS', 'LKM1', 'Prostate', 'LKM2',
+               'CML treatment',
+               'ALL_AML_4']
+    # dataset = ['Colon', 'BT1']
     dataset = [filename.rstrip('.csv') for filename in dataset]  # 去除.csv后缀
     data_num = len(dataset)
     # 运行的方法
@@ -337,9 +337,9 @@ def main():
     # methodset = ['VLPSO', 'FESSA', 'FTMGWO', 'BBPSO','SFEPSO','SFE','PSO','QLDGS-PSO', 'QLDGS-PSO-Elite']
     # methodset = ['QLDGS-GA', 'QLDGS-PSO', 'SFEPSO', 'VLPSO', 'BBPSO', 'CUSSPSO', 'PSO', 'QBSO']
     # methodset = ['QLDGS-GA', 'QLDGS-PSO', 'SFEPSO']
-    # methodset = ['rlpsoasm', 'QLDGS-PSO', 'QLDGS-PSO-Elite']
-    # methodset = ['godcpso']
-    methodset = ['rlpsoasm', "tmgwo", "essa", "SFE", "PSO", "BBPSO", "VLPSO", "SFEPSO", "QLDGS-PSO", "QLDGS-PSO-Elite", 'lapsodr', "igpso"]
+    # methodset = ['rlpsoasm', 'QLDGS-PSO', 'QLDGS-PSO-Elite', 'eqlfs']
+    methodset = ["eqlfs"]
+    # methodset = ['rlpsoasm', "tmgwo", "essa", "SFE", "PSO", "BBPSO", "VLPSO", "SFEPSO", "QLDGS-PSO", "QLDGS-PSO-Elite", 'lapsodr', "igpso", "eqlfs"]
     method_num = len(methodset)
     # 共同参数
     runs = 2  # 方法运行次数
