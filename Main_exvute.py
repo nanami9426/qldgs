@@ -119,15 +119,25 @@ def process_name(data_name, method_list, opts, runs, current_date, save_index = 
             X_test = X_valid.copy()
             Y_test = Y_valid.copy()
             opts['random_seed'] = random_seed
+            opts['data_name'] = data_name
+            opts['method_name'] = method
+            opts['run_index'] = run + 1
+            opts['run_total'] = runs
             module = importlib.import_module(method)  # 动态加载模块
             fs_method = getattr(module, 'fs', None)  # 获取函数对象
             if fs_method is not None and callable(fs_method):
                 # 记录开始时间
                 start_time = time.time()
+                print(f"[{data_name}][{method}][run {run + 1}/{runs}] start", flush=True)
                 # 条件判断语句，用于检查获取到的方法对象是否不为空且可调用。
                 FS = fs_method(X_train.copy(), X_valid.copy(), Y_train.copy(), Y_valid.copy(), opts)
                 # 记录结束时间
                 end_time = time.time()
+                print(
+                    f"[{data_name}][{method}][run {run + 1}/{runs}] "
+                    f"selected {FS['nf']} features in {end_time - start_time:.2f}s",
+                    flush=True,
+                )
                 # 记录部分结果
                 sf[run, :] = FS['sf']
                 nsf = sf[run, :]
@@ -342,7 +352,7 @@ def main():
     # methodset = ['rlpsoasm', "tmgwo", "essa", "SFE", "PSO", "BBPSO", "VLPSO", "SFEPSO", "QLDGS-PSO", "QLDGS-PSO-Elite", 'lapsodr', "igpso", "eqlfs"]
     method_num = len(methodset)
     # 共同参数
-    runs = 2  # 方法运行次数
+    runs = 20  # 方法运行次数
     N = 20  # 种群规模
     Maxiter = 500  # 种群最大迭代次数
     classify = 'knn'  # 分类方法

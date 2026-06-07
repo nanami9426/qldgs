@@ -1,4 +1,6 @@
 import math
+import os
+import time
 from dataclasses import dataclass
 
 import numpy as np
@@ -68,40 +70,94 @@ class DecisionTreeSubsetEvaluator:
 
 
 def _clean_sparse(q):
-    return {k: float(v) for k, v in q.items() if abs(v) > _ZERO_TOL}
+    clean = {}
+    for state, row in q.items():
+        clean_row = {
+            int(action): float(value)
+            for action, value in row.items()
+            if abs(value) > _ZERO_TOL
+        }
+        if clean_row:
+            clean[int(state)] = clean_row
+    return clean
 
 
-def _available_actions(dim, selected, end_state):
-    if not selected:
-        return np.arange(dim + 1, dtype=int)
-    unavailable = np.zeros(dim + 1, dtype=bool)
-    unavailable[np.asarray(selected, dtype=int)] = True
-    actions = np.flatnonzero(~unavailable)
-    if actions[-1] != end_state:
-        actions = np.append(actions, end_state)
-    return actions
+def _copy_qtable(q):
+    return {int(state): dict(row) for state, row in q.items()}
 
 
-def _q_values(q, state, actions):
-    return np.array([q.get((state, int(action)), 0.0) for action in actions], dtype=float)
+def _iter_keys(q):
+    for state, row in q.items():
+        for action in row:
+            yield int(state), int(action)
 
 
-def _max_available_q(q, state, actions):
-    if actions.size == 0:
-        return 0.0
-    values = _q_values(q, state, actions)
-    return float(values.max(initial=0.0))
+def _q_get(q, state, action):
+    return float(q.get(int(state), {}).get(int(action), 0.0))
 
 
-def _sample_next_action(q, state, selected, dim, end_state, epsilon, rng):
-    actions = _available_actions(dim, selected, end_state)
+def _q_set(q, state, action, value, q_clip):
+    state = int(state)
+    action = int(action)
+    value = float(np.clip(value, -q_clip, q_clip))
+    if abs(value) <= _ZERO_TOL:
+        row = q.get(state)
+        if row is not None:
+            row.pop(action, None)
+            if not row:
+                q.pop(state, None)
+        return
+    q.setdefault(state, {})[action] = value
+
+
+def _is_action_available(action, selected_set, dim, end_state):
+    return action == end_state or (0 <= action < dim and action not in selected_set)
+
+
+def _random_available_action(dim, selected_set, end_state, rng):
+    if len(selected_set) >= dim:
+        return end_state
+    for _ in range(32):
+        action = int(rng.integers(0, dim + 1))
+        if _is_action_available(action, selected_set, dim, end_state):
+            return action
+    while True:
+        action = int(rng.integers(0, dim + 1))
+        if _is_action_available(action, selected_set, dim, end_state):
+            return action
+
+
+def _known_available_best(q, state, selected_set, dim, end_state):
+    best_value = -np.inf
+    best_actions = []
+    for action, value in q.get(int(state), {}).items():
+        action = int(action)
+        if not _is_action_available(action, selected_set, dim, end_state):
+            continue
+        value = float(value)
+        if value > best_value + _ZERO_TOL:
+            best_value = value
+            best_actions = [action]
+        elif np.isclose(value, best_value):
+            best_actions.append(action)
+    return best_value, best_actions
+
+
+def _max_available_q(q, state, selected_set, dim, end_state):
+    best_value, _ = _known_available_best(q, state, selected_set, dim, end_state)
+    return float(max(0.0, best_value))
+
+
+def _sample_next_action(q, state, selected_set, dim, end_state, epsilon, rng):
     if rng.random() < epsilon:
-        return int(rng.choice(actions))
+        return _random_available_action(dim, selected_set, end_state, rng)
 
-    values = _q_values(q, state, actions)
-    best_value = values.max(initial=0.0)
-    best_actions = actions[np.isclose(values, best_value)]
-    return int(rng.choice(best_actions))
+    best_value, best_actions = _known_available_best(
+        q, state, selected_set, dim, end_state
+    )
+    if best_actions and best_value > 0:
+        return int(rng.choice(best_actions))
+    return _random_available_action(dim, selected_set, end_state, rng)
 
 
 def _greedy_subset(q, dim, end_state, max_steps, rng):
@@ -109,11 +165,13 @@ def _greedy_subset(q, dim, end_state, max_steps, rng):
     selected_set = set()
     state = end_state
     for _ in range(max_steps):
-        actions = _available_actions(dim, selected, end_state)
-        values = _q_values(q, state, actions)
-        best_value = values.max(initial=0.0)
-        best_actions = actions[np.isclose(values, best_value)]
-        action = int(rng.choice(best_actions))
+        best_value, best_actions = _known_available_best(
+            q, state, selected_set, dim, end_state
+        )
+        if best_actions and best_value > 0:
+            action = int(rng.choice(best_actions))
+        else:
+            action = _random_available_action(dim, selected_set, end_state, rng)
         if action == end_state:
             break
         if action in selected_set:
@@ -131,16 +189,17 @@ def _qtable_score(q, evaluator, dim, end_state, max_steps, rng):
 
 
 def _copy_qtables(qtables):
-    return [dict(q) for q in qtables]
+    return [_copy_qtable(q) for q in qtables]
 
 
 def _scale_inject(q, q_best, alpha):
-    keys = set(q) | set(q_best)
+    keys = set(_iter_keys(q)) | set(_iter_keys(q_best))
     mixed = {}
-    for key in keys:
-        value = (1.0 - alpha) * q_best.get(key, 0.0) + alpha * q.get(key, 0.0)
-        if abs(value) > _ZERO_TOL:
-            mixed[key] = float(value)
+    for state, action in keys:
+        value = (1.0 - alpha) * _q_get(q_best, state, action) + alpha * _q_get(
+            q, state, action
+        )
+        _q_set(mixed, state, action, value, q_clip=np.inf)
     return mixed
 
 
@@ -163,7 +222,7 @@ def _run_sparse_pso(
     velocities = [dict() for _ in range(particle_count)]
     pbest = _copy_qtables(qtables)
     pbest_scores = np.full(particle_count, -np.inf)
-    gbest = dict(qtables[0])
+    gbest = _copy_qtable(qtables[0])
     gbest_score = -np.inf
     gbest_valid = -np.inf
 
@@ -171,31 +230,34 @@ def _run_sparse_pso(
         score, valid_acc, _, _ = _qtable_score(q, evaluator, dim, end_state, max_steps, rng)
         pbest_scores[i] = score
         if (score > gbest_score) or (np.isclose(score, gbest_score) and valid_acc > gbest_valid):
-            gbest = dict(q)
+            gbest = _copy_qtable(q)
             gbest_score = score
             gbest_valid = valid_acc
 
     for _ in range(max(1, pso_iterations)):
         for i in range(particle_count):
-            keys = set(qtables[i]) | set(velocities[i]) | set(pbest[i]) | set(gbest)
+            keys = (
+                set(_iter_keys(qtables[i]))
+                | set(_iter_keys(velocities[i]))
+                | set(_iter_keys(pbest[i]))
+                | set(_iter_keys(gbest))
+            )
             next_q = {}
             next_v = {}
-            for key in keys:
-                x = qtables[i].get(key, 0.0)
-                vel = velocities[i].get(key, 0.0)
+            for state, action in keys:
+                x = _q_get(qtables[i], state, action)
+                vel = _q_get(velocities[i], state, action)
                 r1 = rng.random()
                 r2 = rng.random()
                 vel = (
                     w * vel
-                    + c1 * r1 * (pbest[i].get(key, 0.0) - x)
-                    + c2 * r2 * (gbest.get(key, 0.0) - x)
+                    + c1 * r1 * (_q_get(pbest[i], state, action) - x)
+                    + c2 * r2 * (_q_get(gbest, state, action) - x)
                 )
                 vel = float(np.clip(vel, vmin, vmax))
                 value = float(np.clip(x + vel, -q_clip, q_clip))
-                if abs(value) > _ZERO_TOL:
-                    next_q[key] = value
-                if abs(vel) > _ZERO_TOL:
-                    next_v[key] = vel
+                _q_set(next_q, state, action, value, q_clip)
+                _q_set(next_v, state, action, vel, q_clip=np.inf)
             qtables[i] = next_q
             velocities[i] = next_v
 
@@ -204,11 +266,11 @@ def _run_sparse_pso(
             )
             if score > pbest_scores[i]:
                 pbest_scores[i] = score
-                pbest[i] = dict(qtables[i])
+                pbest[i] = _copy_qtable(qtables[i])
             if (score > gbest_score) or (
                 np.isclose(score, gbest_score) and valid_acc > gbest_valid
             ):
-                gbest = dict(qtables[i])
+                gbest = _copy_qtable(qtables[i])
                 gbest_score = score
                 gbest_valid = valid_acc
 
@@ -225,9 +287,14 @@ def _episode_indices(ytrain, ratio, rng):
 
 
 def _fallback_feature(q_best, xtrain, dim, end_state):
-    row_values = np.array([q_best.get((end_state, j), 0.0) for j in range(dim)])
-    if np.any(np.abs(row_values) > _ZERO_TOL):
-        return int(np.argmax(row_values))
+    row = q_best.get(int(end_state), {})
+    candidates = [
+        (int(action), float(value))
+        for action, value in row.items()
+        if 0 <= int(action) < dim
+    ]
+    if candidates:
+        return max(candidates, key=lambda item: item[1])[0]
     variances = np.var(xtrain, axis=0)
     return int(np.argmax(variances))
 
@@ -264,6 +331,12 @@ def _resize_curve(values, target_len):
         return padded.reshape(1, -1)
     indices = np.round(np.linspace(0, len(arr) - 1, target_len)).astype(int)
     return arr[indices].reshape(1, -1)
+
+
+def _as_bool(value):
+    if isinstance(value, str):
+        return value.strip().lower() not in {"0", "false", "no", "off"}
+    return bool(value)
 
 
 def fs(xtrain, xvalid, ytrain, yvalid, opts=None):
@@ -309,6 +382,17 @@ def fs(xtrain, xvalid, ytrain, yvalid, opts=None):
         gain_weights = (0.5, 0.3, 0.2)
     else:
         gain_weights = tuple(float(w) / total_weight for w in gain_weights)
+    verbose = _as_bool(opts.get("eqlfs_verbose", True))
+    progress_interval = int(opts.get("eqlfs_progress_interval", max(1, episodes // 10)))
+    progress_interval = max(0, progress_interval)
+    data_name = opts.get("data_name", "dataset")
+    method_name = opts.get("method_name", "eqlfs")
+    run_index = opts.get("run_index", "?")
+    run_total = opts.get("run_total", "?")
+    progress_prefix = (
+        f"[{data_name}][{method_name}][run {run_index}/{run_total}]"
+        f"[pid {os.getpid()}]"
+    )
 
     end_state = dim
     qtables = [dict() for _ in range(agents)]
@@ -322,13 +406,20 @@ def fs(xtrain, xvalid, ytrain, yvalid, opts=None):
     best_q = {}
     best_project_fit = math.inf
     curve_values = []
+    started_at = time.time()
+    if verbose:
+        print(
+            f"{progress_prefix} EQLFS start: dim={dim}, agents={agents}, "
+            f"episodes={episodes}, max_steps={max_steps}",
+            flush=True,
+        )
 
-    for _ in range(episodes):
-        episode_idx = _episode_indices(ytrain, episode_ratio, rng)
+    for episode in range(episodes):
+        sample_idx = _episode_indices(ytrain, episode_ratio, rng)
         episode_evaluator = DecisionTreeSubsetEvaluator(
-            xtrain[episode_idx],
+            xtrain[sample_idx],
             xvalid,
-            ytrain[episode_idx],
+            ytrain[sample_idx],
             yvalid,
             dim,
             gain_weights,
@@ -342,7 +433,7 @@ def fs(xtrain, xvalid, ytrain, yvalid, opts=None):
             last_error = 0.0
             for _ in range(max_steps):
                 action = _sample_next_action(
-                    q, state, selected, dim, end_state, epsilon, rng
+                    q, state, selected_set, dim, end_state, epsilon, rng
                 )
                 if action == end_state:
                     break
@@ -354,17 +445,12 @@ def fs(xtrain, xvalid, ytrain, yvalid, opts=None):
                 stats = episode_evaluator.evaluate(selected)
                 reward = last_error - stats.error
                 next_state = action
-                next_actions = _available_actions(dim, selected, end_state)
                 td_target = reward + gamma * _max_available_q(
-                    q, next_state, next_actions
+                    q, next_state, selected_set, dim, end_state
                 )
-                key = (state, action)
-                old_value = q.get(key, 0.0)
+                old_value = _q_get(q, state, action)
                 new_value = old_value + lr * (td_target - old_value)
-                if abs(new_value) > _ZERO_TOL:
-                    q[key] = float(np.clip(new_value, -q_clip, q_clip))
-                elif key in q:
-                    del q[key]
+                _q_set(q, state, action, new_value, q_clip)
                 last_error = stats.error
                 state = next_state
 
@@ -400,15 +486,32 @@ def fs(xtrain, xvalid, ytrain, yvalid, opts=None):
             best_valid = valid_acc
             best_gain = stats.gain
             best_mask = mask.copy()
-            best_q = dict(q_best)
+            best_q = _copy_qtable(q_best)
             best_project_fit = project_fit
 
         curve_values.append(best_project_fit if np.isfinite(best_project_fit) else project_fit)
         qtables = [_scale_inject(q, q_best, alpha) for q in qtables]
+        if verbose and progress_interval > 0:
+            episode_no = episode + 1
+            if episode_no == 1 or episode_no == episodes or episode_no % progress_interval == 0:
+                elapsed = time.time() - started_at
+                best_nf = int(np.sum(best_mask)) if best_mask is not None else 0
+                print(
+                    f"{progress_prefix} episode {episode_no}/{episodes} "
+                    f"elapsed={elapsed:.1f}s best_fit={best_project_fit:.6f} "
+                    f"best_valid={best_valid:.4f} best_nf={best_nf}",
+                    flush=True,
+                )
 
     if best_mask is None or np.sum(best_mask) == 0:
         best_mask = _mask_from_selected([], dim, best_q, xtrain, end_state)
     nf = int(np.sum(best_mask))
     target_curve_len = int(opts.get("T", episodes))
     curve = _resize_curve(curve_values, target_curve_len)
+    if verbose:
+        print(
+            f"{progress_prefix} EQLFS done: elapsed={time.time() - started_at:.1f}s "
+            f"nf={nf} best_fit={best_project_fit:.6f}",
+            flush=True,
+        )
     return {"sf": best_mask.astype(int), "c": curve, "nf": nf}
