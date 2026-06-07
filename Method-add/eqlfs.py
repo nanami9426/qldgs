@@ -110,6 +110,36 @@ def _q_set(q, state, action, value, q_clip):
     q.setdefault(state, {})[action] = value
 
 
+def _count_q_entries(q):
+    return sum(len(row) for row in q.values())
+
+
+def _prune_qtable(q, max_entries=0, max_actions_per_state=0):
+    if max_actions_per_state and max_actions_per_state > 0:
+        for state in list(q):
+            row = q[state]
+            if len(row) > max_actions_per_state:
+                keep = sorted(row.items(), key=lambda item: abs(item[1]), reverse=True)[
+                    :max_actions_per_state
+                ]
+                q[state] = dict(keep)
+            if not q[state]:
+                q.pop(state, None)
+
+    if max_entries and max_entries > 0 and _count_q_entries(q) > max_entries:
+        ranked = sorted(
+            _iter_keys(q),
+            key=lambda key: abs(_q_get(q, key[0], key[1])),
+            reverse=True,
+        )[:max_entries]
+        keep = {}
+        for state, action in ranked:
+            _q_set(keep, state, action, _q_get(q, state, action), q_clip=np.inf)
+        q.clear()
+        q.update(keep)
+    return q
+
+
 def _is_action_available(action, selected_set, dim, end_state):
     return action == end_state or (0 <= action < dim and action not in selected_set)
 
@@ -216,6 +246,8 @@ def _run_sparse_pso(
     vmin,
     vmax,
     q_clip,
+    max_q_entries,
+    max_actions_per_state,
     rng,
 ):
     particle_count = len(qtables)
@@ -260,6 +292,8 @@ def _run_sparse_pso(
                 _q_set(next_v, state, action, vel, q_clip=np.inf)
             qtables[i] = next_q
             velocities[i] = next_v
+            _prune_qtable(qtables[i], max_q_entries, max_actions_per_state)
+            _prune_qtable(velocities[i], max_q_entries, max_actions_per_state)
 
             score, valid_acc, _, _ = _qtable_score(
                 qtables[i], evaluator, dim, end_state, max_steps, rng
@@ -267,10 +301,12 @@ def _run_sparse_pso(
             if score > pbest_scores[i]:
                 pbest_scores[i] = score
                 pbest[i] = _copy_qtable(qtables[i])
+                _prune_qtable(pbest[i], max_q_entries, max_actions_per_state)
             if (score > gbest_score) or (
                 np.isclose(score, gbest_score) and valid_acc > gbest_valid
             ):
                 gbest = _copy_qtable(qtables[i])
+                _prune_qtable(gbest, max_q_entries, max_actions_per_state)
                 gbest_score = score
                 gbest_valid = valid_acc
 
@@ -372,6 +408,9 @@ def fs(xtrain, xvalid, ytrain, yvalid, opts=None):
     default_max_steps = min(dim, 50)
     max_steps = max(1, int(opts.get("eqlfs_max_steps", default_max_steps)))
     max_steps = min(dim, max_steps)
+    default_max_q_entries = max(2000, agents * max_steps * 10)
+    max_q_entries = int(opts.get("eqlfs_max_q_entries", default_max_q_entries))
+    max_actions_per_state = int(opts.get("eqlfs_max_actions_per_state", 32))
     gain_weights = opts.get("eqlfs_gain_weights", (0.5, 0.3, 0.2))
     if isinstance(gain_weights, str):
         gain_weights = tuple(float(x) for x in gain_weights.split(","))
@@ -383,7 +422,7 @@ def fs(xtrain, xvalid, ytrain, yvalid, opts=None):
     else:
         gain_weights = tuple(float(w) / total_weight for w in gain_weights)
     verbose = _as_bool(opts.get("eqlfs_verbose", True))
-    progress_interval = int(opts.get("eqlfs_progress_interval", max(1, episodes // 10)))
+    progress_interval = int(opts.get("eqlfs_progress_interval", 1))
     progress_interval = max(0, progress_interval)
     data_name = opts.get("data_name", "dataset")
     method_name = opts.get("method_name", "eqlfs")
@@ -410,7 +449,8 @@ def fs(xtrain, xvalid, ytrain, yvalid, opts=None):
     if verbose:
         print(
             f"{progress_prefix} EQLFS start: dim={dim}, agents={agents}, "
-            f"episodes={episodes}, max_steps={max_steps}",
+            f"episodes={episodes}, max_steps={max_steps}, "
+            f"max_q_entries={max_q_entries}",
             flush=True,
         )
 
@@ -453,6 +493,7 @@ def fs(xtrain, xvalid, ytrain, yvalid, opts=None):
                 _q_set(q, state, action, new_value, q_clip)
                 last_error = stats.error
                 state = next_state
+            _prune_qtable(q, max_q_entries, max_actions_per_state)
 
         q_best = _run_sparse_pso(
             qtables,
@@ -467,8 +508,11 @@ def fs(xtrain, xvalid, ytrain, yvalid, opts=None):
             vmin,
             vmax,
             q_clip,
+            max_q_entries,
+            max_actions_per_state,
             rng,
         )
+        _prune_qtable(q_best, max_q_entries, max_actions_per_state)
         _, valid_acc, stats, selected = _qtable_score(
             q_best, full_evaluator, dim, end_state, max_steps, rng
         )
@@ -490,16 +534,27 @@ def fs(xtrain, xvalid, ytrain, yvalid, opts=None):
             best_project_fit = project_fit
 
         curve_values.append(best_project_fit if np.isfinite(best_project_fit) else project_fit)
-        qtables = [_scale_inject(q, q_best, alpha) for q in qtables]
+        qtables = [
+            _prune_qtable(
+                _scale_inject(q, q_best, alpha),
+                max_q_entries,
+                max_actions_per_state,
+            )
+            for q in qtables
+        ]
         if verbose and progress_interval > 0:
             episode_no = episode + 1
             if episode_no == 1 or episode_no == episodes or episode_no % progress_interval == 0:
                 elapsed = time.time() - started_at
                 best_nf = int(np.sum(best_mask)) if best_mask is not None else 0
+                q_entries = max(_count_q_entries(q) for q in qtables) if qtables else 0
+                avg_episode = elapsed / max(1, episode_no)
+                eta = avg_episode * (episodes - episode_no)
                 print(
                     f"{progress_prefix} episode {episode_no}/{episodes} "
                     f"elapsed={elapsed:.1f}s best_fit={best_project_fit:.6f} "
-                    f"best_valid={best_valid:.4f} best_nf={best_nf}",
+                    f"best_valid={best_valid:.4f} best_nf={best_nf} "
+                    f"q_entries={q_entries} eta={eta:.1f}s",
                     flush=True,
                 )
 
