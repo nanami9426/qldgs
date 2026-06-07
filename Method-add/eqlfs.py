@@ -260,7 +260,7 @@ def _sample_next_action(q, state, selected_set, dim, end_state, epsilon, rng):
     return _random_available_action(dim, selected_set, end_state, rng)
 
 
-def _greedy_subset(q, dim, end_state, max_steps, rng):
+def _greedy_path(q, dim, end_state, max_steps, rng):
     selected = []
     selected_set = set()
     state = end_state
@@ -282,10 +282,27 @@ def _greedy_subset(q, dim, end_state, max_steps, rng):
     return tuple(selected)
 
 
-def _qtable_score(q, evaluator, dim, end_state, max_steps, rng):
-    selected = _greedy_subset(q, dim, end_state, max_steps, rng)
-    stats = evaluator.evaluate(selected)
-    return stats.gain, stats.valid_acc, stats, selected
+def _qtable_score(q, evaluator, dim, end_state, max_steps, min_features, stop_tolerance, rng):
+    path = _greedy_path(q, dim, end_state, max_steps, rng)
+    if not path:
+        stats = evaluator.evaluate(())
+        return stats.gain, stats.valid_acc, stats, ()
+
+    best_selected = path[:min_features]
+    best_stats = evaluator.evaluate(best_selected)
+    stable_rounds = 0
+    for length in range(max(1, min_features), len(path) + 1):
+        selected = path[:length]
+        stats = evaluator.evaluate(selected)
+        if stats.gain > best_stats.gain + stop_tolerance:
+            best_selected = selected
+            best_stats = stats
+            stable_rounds = 0
+        else:
+            stable_rounds += 1
+            if stable_rounds >= 10 and length >= min_features:
+                break
+    return best_stats.gain, best_stats.valid_acc, best_stats, best_selected
 
 
 def _copy_qtables(qtables):
@@ -309,6 +326,8 @@ def _run_sparse_pso(
     dim,
     end_state,
     max_steps,
+    min_features,
+    stop_tolerance,
     pso_iterations,
     w,
     c1,
@@ -329,7 +348,9 @@ def _run_sparse_pso(
     gbest_valid = -np.inf
 
     for i, q in enumerate(qtables):
-        score, valid_acc, _, _ = _qtable_score(q, evaluator, dim, end_state, max_steps, rng)
+        score, valid_acc, _, _ = _qtable_score(
+            q, evaluator, dim, end_state, max_steps, min_features, stop_tolerance, rng
+        )
         pbest_scores[i] = score
         if (score > gbest_score) or (np.isclose(score, gbest_score) and valid_acc > gbest_valid):
             gbest = _copy_qtable(q)
@@ -366,7 +387,7 @@ def _run_sparse_pso(
             _prune_qtable(velocities[i], max_q_entries, max_actions_per_state)
 
             score, valid_acc, _, _ = _qtable_score(
-                qtables[i], evaluator, dim, end_state, max_steps, rng
+                qtables[i], evaluator, dim, end_state, max_steps, min_features, stop_tolerance, rng
             )
             if score > pbest_scores[i]:
                 pbest_scores[i] = score
@@ -481,9 +502,12 @@ def fs(xtrain, xvalid, ytrain, yvalid, opts=None):
     vmin = float(opts.get("eqlfs_vmin", -0.5))
     vmax = float(opts.get("eqlfs_vmax", 0.5))
     q_clip = float(opts.get("eqlfs_q_clip", 1.0))
-    default_max_steps = min(dim, 50)
+    default_max_steps = min(dim, max(50, int(math.sqrt(dim) * 4)))
     max_steps = max(1, int(opts.get("eqlfs_max_steps", default_max_steps)))
     max_steps = min(dim, max_steps)
+    min_features = max(1, int(opts.get("eqlfs_min_features", 1)))
+    min_features = min(min_features, max_steps)
+    stop_tolerance = float(opts.get("eqlfs_stop_tolerance", 1e-6))
     default_max_q_entries = max(1000, agents * max_steps * 2)
     max_q_entries = int(opts.get("eqlfs_max_q_entries", default_max_q_entries))
     max_actions_per_state = int(opts.get("eqlfs_max_actions_per_state", 8))
@@ -533,7 +557,7 @@ def fs(xtrain, xvalid, ytrain, yvalid, opts=None):
     if verbose:
         print(
             f"{progress_prefix} EQLFS start: dim={dim}, agents={agents}, "
-            f"episodes={episodes}, max_steps={max_steps}, "
+            f"episodes={episodes}, max_steps={max_steps}, min_features={min_features}, "
             f"max_q_entries={max_q_entries}, eval_mode={eval_mode}, "
             f"project_fitness={use_project_fitness}",
             flush=True,
@@ -598,6 +622,8 @@ def fs(xtrain, xvalid, ytrain, yvalid, opts=None):
             dim,
             end_state,
             max_steps,
+            min_features,
+            stop_tolerance,
             pso_iterations,
             pso_w,
             pso_c1,
@@ -611,7 +637,14 @@ def fs(xtrain, xvalid, ytrain, yvalid, opts=None):
         )
         _prune_qtable(q_best, max_q_entries, max_actions_per_state)
         _, _, _, selected = _qtable_score(
-            q_best, pso_evaluator, dim, end_state, max_steps, rng
+            q_best,
+            pso_evaluator,
+            dim,
+            end_state,
+            max_steps,
+            min_features,
+            stop_tolerance,
+            rng,
         )
         mask = _mask_from_selected(selected, dim, q_best, xtrain, end_state)
         actual_selected = tuple(np.flatnonzero(mask))
