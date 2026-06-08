@@ -31,12 +31,14 @@ class DecisionTreeSubsetEvaluator:
         dim,
         gain_weights,
         random_state=None,
+        total_dim=None,
     ):
         self.xtrain = np.nan_to_num(np.asarray(xtrain))
         self.xvalid = np.nan_to_num(np.asarray(xvalid))
         self.ytrain = np.asarray(ytrain).reshape(-1)
         self.yvalid = np.asarray(yvalid).reshape(-1)
         self.dim = dim
+        self.total_dim = total_dim or dim
         self.gain_weights = gain_weights
         self.random_state = random_state
         self.cache = {}
@@ -55,7 +57,7 @@ class DecisionTreeSubsetEvaluator:
         clf.fit(self.xtrain[:, features], self.ytrain)
         train_acc = float(clf.score(self.xtrain[:, features], self.ytrain))
         valid_acc = float(clf.score(self.xvalid[:, features], self.yvalid))
-        compression = 1.0 - (len(key) / max(1, self.dim))
+        compression = 1.0 - (len(key) / max(1, self.total_dim))
         generalization = 1.0 - min(1.0, abs(train_acc - valid_acc))
         w1, w2, w3 = self.gain_weights
         gain = w1 * valid_acc + w2 * compression + w3 * generalization
@@ -98,9 +100,39 @@ def _feature_relevance_scores(xtrain, ytrain):
     return scores
 
 
+def _candidate_feature_indices(xtrain, ytrain, candidate_count, rng):
+    dim = xtrain.shape[1]
+    if candidate_count >= dim:
+        return np.arange(dim, dtype=int), _feature_relevance_scores(xtrain, ytrain)
+
+    scores = _feature_relevance_scores(xtrain, ytrain)
+    ranked = np.argsort(-scores, kind="stable")
+    candidate_count = max(1, min(dim, int(candidate_count)))
+    selected = ranked[:candidate_count]
+
+    # Keep a small random tail so weakly ranked features are not permanently
+    # excluded when many relevance scores are tied on small-sample datasets.
+    random_ratio = 0.1
+    random_count = int(round(candidate_count * random_ratio))
+    if random_count > 0 and candidate_count < dim:
+        top_count = max(1, candidate_count - random_count)
+        top = ranked[:top_count]
+        remaining = ranked[top_count:]
+        random_tail = rng.choice(
+            remaining, size=min(random_count, len(remaining)), replace=False
+        )
+        selected = np.unique(np.concatenate((top, random_tail))).astype(int)
+        if len(selected) < candidate_count:
+            fill = [idx for idx in ranked if idx not in set(selected)]
+            selected = np.concatenate((selected, np.asarray(fill[: candidate_count - len(selected)])))
+
+    return np.asarray(selected[:candidate_count], dtype=int), scores
+
+
 class FastSubsetEvaluator:
-    def __init__(self, xtrain, xvalid, ytrain, yvalid, dim, gain_weights):
+    def __init__(self, xtrain, xvalid, ytrain, yvalid, dim, gain_weights, total_dim=None):
         self.dim = dim
+        self.total_dim = total_dim or dim
         self.gain_weights = gain_weights
         self.scores = _feature_relevance_scores(xtrain, ytrain)
         self.cache = {}
@@ -118,7 +150,7 @@ class FastSubsetEvaluator:
         rel = self.scores[features]
         k = len(key)
         signal = 1.0 - math.exp(-float(rel.sum()) / max(1.0, math.sqrt(k)))
-        compression = 1.0 - (k / max(1, self.dim))
+        compression = 1.0 - (k / max(1, self.total_dim))
         valid_acc = float(np.clip(0.5 + 0.5 * signal - 0.03 * (1.0 - compression), 0.0, 1.0))
         train_acc = float(np.clip(valid_acc + 0.02 * signal, 0.0, 1.0))
         generalization = 1.0 - min(1.0, abs(train_acc - valid_acc))
@@ -481,12 +513,24 @@ def fs(xtrain, xvalid, ytrain, yvalid, opts=None):
     ytrain = np.asarray(ytrain).reshape(-1)
     yvalid = np.asarray(yvalid).reshape(-1)
 
-    dim = int(xtrain.shape[1])
-    if dim == 0:
+    original_xtrain = xtrain
+    original_xvalid = xvalid
+    original_dim = int(original_xtrain.shape[1])
+    if original_dim == 0:
         return {"sf": np.zeros(0, dtype=int), "c": np.ones((1, int(opts.get("T", 1)))), "nf": 0}
 
     seed = opts.get("random_seed")
     rng = default_rng(seed)
+    default_candidate_count = min(original_dim, int(opts.get("eqlfs_default_candidate_features", 256)))
+    candidate_count = int(opts.get("eqlfs_candidate_features", default_candidate_count))
+    candidate_idx, _ = _candidate_feature_indices(
+        original_xtrain, ytrain, candidate_count, rng
+    )
+    xtrain = original_xtrain[:, candidate_idx]
+    xvalid = original_xvalid[:, candidate_idx]
+    dim = int(xtrain.shape[1])
+    length_denominator = str(opts.get("eqlfs_length_denominator", "candidate")).lower()
+    length_dim = original_dim if length_denominator == "original" else dim
     agents = max(1, int(opts.get("eqlfs_agents", opts.get("N", 20))))
     episodes = max(1, int(opts.get("eqlfs_episodes", opts.get("T", 100))))
     episode_ratio = float(opts.get("eqlfs_episode_ratio", 0.7))
@@ -502,15 +546,15 @@ def fs(xtrain, xvalid, ytrain, yvalid, opts=None):
     vmin = float(opts.get("eqlfs_vmin", -0.5))
     vmax = float(opts.get("eqlfs_vmax", 0.5))
     q_clip = float(opts.get("eqlfs_q_clip", 1.0))
-    default_max_steps = min(dim, max(50, int(math.sqrt(dim) * 4)))
+    default_max_steps = min(dim, int(opts.get("eqlfs_default_max_steps", 50)))
     max_steps = max(1, int(opts.get("eqlfs_max_steps", default_max_steps)))
     max_steps = min(dim, max_steps)
     min_features = max(1, int(opts.get("eqlfs_min_features", 1)))
     min_features = min(min_features, max_steps)
     stop_tolerance = float(opts.get("eqlfs_stop_tolerance", 1e-6))
-    default_max_q_entries = max(1000, agents * max_steps * 2)
+    default_max_q_entries = max(500, agents * max_steps)
     max_q_entries = int(opts.get("eqlfs_max_q_entries", default_max_q_entries))
-    max_actions_per_state = int(opts.get("eqlfs_max_actions_per_state", 8))
+    max_actions_per_state = int(opts.get("eqlfs_max_actions_per_state", 4))
     gain_weights = opts.get("eqlfs_gain_weights", (0.5, 0.3, 0.2))
     if isinstance(gain_weights, str):
         gain_weights = tuple(float(x) for x in gain_weights.split(","))
@@ -526,7 +570,7 @@ def fs(xtrain, xvalid, ytrain, yvalid, opts=None):
         eval_mode = "hybrid"
     verbose = _as_bool(opts.get("eqlfs_verbose", True))
     use_project_fitness = _as_bool(opts.get("eqlfs_project_fitness", False))
-    progress_interval = int(opts.get("eqlfs_progress_interval", 1))
+    progress_interval = int(opts.get("eqlfs_progress_interval", 10))
     progress_interval = max(0, progress_interval)
     data_name = opts.get("data_name", "dataset")
     method_name = opts.get("method_name", "eqlfs")
@@ -539,12 +583,21 @@ def fs(xtrain, xvalid, ytrain, yvalid, opts=None):
 
     end_state = dim
     qtables = [dict() for _ in range(agents)]
-    fast_full_evaluator = FastSubsetEvaluator(xtrain, xvalid, ytrain, yvalid, dim, gain_weights)
+    fast_full_evaluator = FastSubsetEvaluator(
+        xtrain, xvalid, ytrain, yvalid, dim, gain_weights, total_dim=length_dim
+    )
     if eval_mode == "fast":
         final_evaluator = fast_full_evaluator
     else:
         final_evaluator = DecisionTreeSubsetEvaluator(
-            xtrain, xvalid, ytrain, yvalid, dim, gain_weights, random_state=seed
+            xtrain,
+            xvalid,
+            ytrain,
+            yvalid,
+            dim,
+            gain_weights,
+            random_state=seed,
+            total_dim=length_dim,
         )
 
     best_mask = None
@@ -556,10 +609,11 @@ def fs(xtrain, xvalid, ytrain, yvalid, opts=None):
     started_at = time.time()
     if verbose:
         print(
-            f"{progress_prefix} EQLFS start: dim={dim}, agents={agents}, "
+            f"{progress_prefix} EQLFS start: original_dim={original_dim}, "
+            f"candidate_dim={dim}, agents={agents}, "
             f"episodes={episodes}, max_steps={max_steps}, min_features={min_features}, "
             f"max_q_entries={max_q_entries}, eval_mode={eval_mode}, "
-            f"project_fitness={use_project_fitness}",
+            f"project_fitness={use_project_fitness}, length_denominator={length_denominator}",
             flush=True,
         )
 
@@ -574,6 +628,7 @@ def fs(xtrain, xvalid, ytrain, yvalid, opts=None):
                 dim,
                 gain_weights,
                 random_state=seed,
+                total_dim=length_dim,
             )
             pso_evaluator = episode_evaluator
         else:
@@ -584,6 +639,7 @@ def fs(xtrain, xvalid, ytrain, yvalid, opts=None):
                 yvalid,
                 dim,
                 gain_weights,
+                total_dim=length_dim,
             )
             pso_evaluator = episode_evaluator
 
@@ -646,12 +702,14 @@ def fs(xtrain, xvalid, ytrain, yvalid, opts=None):
             stop_tolerance,
             rng,
         )
-        mask = _mask_from_selected(selected, dim, q_best, xtrain, end_state)
-        actual_selected = tuple(np.flatnonzero(mask))
+        internal_mask = _mask_from_selected(selected, dim, q_best, xtrain, end_state)
+        actual_selected = tuple(np.flatnonzero(internal_mask))
         stats = final_evaluator.evaluate(actual_selected)
         valid_acc = stats.valid_acc
-        nf_candidate = int(np.sum(mask))
-        candidate_fit = _proxy_curve_value(valid_acc, nf_candidate, dim, opts)
+        original_mask = np.zeros(original_dim, dtype=int)
+        original_mask[candidate_idx[np.asarray(actual_selected, dtype=int)]] = 1
+        nf_candidate = int(np.sum(original_mask))
+        candidate_fit = _proxy_curve_value(valid_acc, nf_candidate, length_dim, opts)
         candidate_can_win = (
             valid_acc > best_valid
             or (np.isclose(valid_acc, best_valid) and stats.gain > best_gain)
@@ -662,7 +720,9 @@ def fs(xtrain, xvalid, ytrain, yvalid, opts=None):
             )
         )
         if use_project_fitness and candidate_can_win:
-            candidate_fit = _project_curve_value(mask, xtrain, xvalid, ytrain, yvalid, opts)
+            candidate_fit = _project_curve_value(
+                original_mask, original_xtrain, original_xvalid, ytrain, yvalid, opts
+            )
         if (
             valid_acc > best_valid
             or (np.isclose(valid_acc, best_valid) and stats.gain > best_gain)
@@ -674,7 +734,7 @@ def fs(xtrain, xvalid, ytrain, yvalid, opts=None):
         ):
             best_valid = valid_acc
             best_gain = stats.gain
-            best_mask = mask.copy()
+            best_mask = original_mask.copy()
             best_q = _copy_qtable(q_best)
             best_project_fit = candidate_fit
 
@@ -704,7 +764,9 @@ def fs(xtrain, xvalid, ytrain, yvalid, opts=None):
                 )
 
     if best_mask is None or np.sum(best_mask) == 0:
-        best_mask = _mask_from_selected([], dim, best_q, xtrain, end_state)
+        internal_mask = _mask_from_selected([], dim, best_q, xtrain, end_state)
+        best_mask = np.zeros(original_dim, dtype=int)
+        best_mask[candidate_idx[internal_mask == 1]] = 1
     nf = int(np.sum(best_mask))
     target_curve_len = int(opts.get("T", episodes))
     curve = _resize_curve(curve_values, target_curve_len)
