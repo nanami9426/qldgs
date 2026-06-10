@@ -348,7 +348,7 @@ def main():
     # methodset = ['QLDGS-GA', 'QLDGS-PSO', 'SFEPSO', 'VLPSO', 'BBPSO', 'CUSSPSO', 'PSO', 'QBSO']
     # methodset = ['QLDGS-GA', 'QLDGS-PSO', 'SFEPSO']
     # methodset = ['rlpsoasm', 'QLDGS-PSO', 'QLDGS-PSO-Elite', 'eqlfs']
-    methodset = ["eqlfs"]
+    methodset = ["rlfs"]
     # methodset = ['rlpsoasm', "tmgwo", "essa", "SFE", "PSO", "BBPSO", "VLPSO", "SFEPSO", "QLDGS-PSO", "QLDGS-PSO-Elite", 'lapsodr', "igpso", "eqlfs"]
     method_num = len(methodset)
     # 共同参数
